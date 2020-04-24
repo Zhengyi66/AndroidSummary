@@ -11,3 +11,5 @@ Android知识点总结
    1、蓝牙通讯。
    https://blog.csdn.net/weixin_39079048/article/details/78923669
    https://blog.csdn.net/VNanyesheshou/article/details/51554852
+
+NestedScrollingChildHelper
