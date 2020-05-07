@@ -1,0 +1,157 @@
+应用性能的影响因素(1)：
+1.	布局的复杂程度对加载和绘制的时长有直接的影响
+2.	初始数据的加载量
+3.	主线程的耗时操作导致慢
+4.	其他线程与主线程抢占系统资源：CPU/GPU/内存带宽/IO等
+
+
+常见分析工具介绍：
+•	Systrace
+•	traceView
+•	Hierarchy View
+•	Pixel Perfect
+•	Tracer for OpenGL ES
+•	GPU过度绘制
+
+内存问题的影响因素&分析方法
+	影响因素
+	图片资源
+	动画效果、纹理的处理
+以上两部分不仅仅是会消耗系统Dalvik的内存，还会额外的消耗GPU内存。
+	分析方法
+使用MAT工具分析不合理的内存消耗及可以降内存的对象
+
+内存优化建议
+及时释放内存
+apk与其他应用及系统作为一个整体共享资源。在内存不足的情况下，Android会要求应用及其组件释放内存。ComponentCallbacks接口定义了API onTrimMemory ( )，它对所有应用组件是相同的。当它被调用时，组件基本会被要求释放那些并不会用到的内存。通常情况下onTrimMemory的实现将释放：
+	缓存或缓存条目（如被强引用的LruCache）；
+	可以再次按需生成的bitmap对象
+	不可见的布局对象；
+	数据库对象。
+
+      释放内存应该慎重，因为重新创建是有开销的。但是如果没有释放出足够的内存会导致Android系统更激进的行为，比如杀进程，谁也不能独善其身。如果应用被杀了，用户下次使用就要从头开始。因此，apk应该在系统处于低内存状态时，释放进可能多的内存，这样的结果是多赢的。onTrimMemory是Android 4.0之后提供的API，系统会根据不同的内存状态来回调。
+系统提供的回调有：
+	Application.onTrimMemory()
+	Activity.onTrimMemory() （可参考http://developer.android.com/reference/android/app/Activity.html ）
+	Fragement.onTrimMemory()
+	Service.onTrimMemory()
+ContentProvider.onTrimMemory()
+
+
+onTrimMemory的参数是一个int数值，代表不同的内存状态：
+1.	TRIM_MEMORY_COMPLETE：内存不足，并且该进程在后台进程列表最后一个，可能很快就会被杀死，此时该进程应该释放所有非关键的内存，来减少被杀的几率。
+2.	TRIM_MEMORY_MODERATE：内存不足，并且该进程在后台进程列表的中部。如果系统内存变得更紧张，那么该进程可能被杀死。 
+3.	TRIM_MEMORY_BACKGROUND：内存不足，并且该进程是后台进程列表的开头。虽然该进程没有很高的风险被杀死，但是可能系统已经在杀后台进程列表中的进程，所以该进程应该去释放一些容易恢复的资源，这样也可以提高这个进程切换到前台的速度。
+4.	TRIM_MEMORY_UI_HIDDEN：并且该进程的UI已经不可见了。所以这是一个好时机去释放只有UI用到的大资源 
+5.	TRIM_MEMORY_RUNNING_CRITICAL：内存严重不足(后台进程不足3个)，并且该进程不能被杀死，该进程需要清理非关键的资源，避免性能下降。
+6.	TRIM_MEMORY_RUNNING_LOW：内存非常不足(后台进程不足5个)，并且该进程正在运行，需要清理没有使用的资源，提高系统性能（直接影响该应用的性能）。
+7.	TRIM_MEMORY_RUNNING_MODERATE：内存开始变得不够，并且该进程正在运行，不能被杀死，可以考虑清理内存 。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+一、性能分析工具：
+1、	Systrace
+2、	Traceview方法调用跟踪
+3、	GPU过度绘制
+4、	GPU呈现模式分析
+5、	Tracer for OpenGL ES Perspective
+6、	Freqdump
+7、	Oprofile
+
+二、内存分析工具介绍
+1、	Allocation Tracker
+2、	heap update
+3、	Memory Analyzer Tool(MAT)
+4、	dumpsys meminfo
+5、	procrank
+6、	showmap
+7、	DDMS Native Heap
+
+三、常用功耗分析工具及方法介绍
+1、top命令查看CPU占用率，分析与CPU相关的功耗问题
+adb shell top -m 5
+2、DUMPSYS 
+adb shell  dumpsys alarm：列出当前有注册alarm的应用
+adb shell  dumpsys power：列出Power Manager的参数，如wakelock时间等
+adb shell  dumpsys batteryinfo：列出各功能使用power的状况。
+3、cat内核节点查看系统状况
+4、vmstat
+使用vmstat命令可以得到关于CPU、进程、内存、内存分页、堵塞IO的信息
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+性能优化分类：
+•	流畅 (卡顿)
+•	稳定 (内存溢出、崩溃)
+•	功耗	(耗电、流量、网络)
+•	安装包 (包体积) 
+
+一、流畅(卡顿)：
+1.布局优化 ：
+	减少嵌套层级(同级选择LinearLayout、FrameLayout)
+	少用wrap_content属性，避免View多次触发measure、layout
+	使用标签：
+		Include:服用布局
+		Merge:配合include使用，减少嵌套层级
+		ViewStub: 轻量级，隐藏的，没有尺寸的View。在需要的时候加载
+2.绘制优化：
+	避免过度绘制：
+避免设置不必要的背景(其他无用属性也应该避免)
+减少不必要的层级嵌套
+	onDraw(): 
+避免创建新对象
+		避免执行大量耗时操作
+3、启动优化(启动慢)
+	1)Application的onCreate()减少不必要的初始化，或者放到子线程中初始化
+	2)启动Activity在onCreate、onStart、onResume方法中避免做耗时操作，
+进行布局优化
+4、列表和Adapter：
+	Adapter中ItemView复用
+	列表滑动时不进行数据加载和UI刷新
+5、UI线程中不做耗时操作(数据库，IO操作，或大量轻微耗时操作) 
+6、声明周期优化：
+不应在Application以及Activity的生命周期回调中做任何费时操作，
+在onCreate，onResume，onStart等回调中所花费的总时间最好不要超过400ms
+7、避免出现频繁的GC，GC的次数越多、消耗在GC上的时间越长，CPU花在界面绘
+制上的时间相应越短
+8、避免同一时间动画执行次数过多，导致CPU或GPU负载过重；
+9、避免后台线程抢占UI线程cpu时间片，阻塞UI渲染。(设置线程优先级)
+
+
+
+稳定：
+1、连续48小时monkey不应出现闪退，anr问题
