@@ -1,0 +1,255 @@
+package com.example.test;
+
+import android.app.Activity;
+import android.content.Context;
+import android.content.res.AssetFileDescriptor;
+import android.media.AudioManager;
+import android.media.MediaPlayer;
+import android.net.wifi.WifiManager;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Message;
+import android.os.PowerManager;
+import android.util.Log;
+import android.view.View;
+import android.widget.Button;
+import android.widget.RadioGroup;
+import android.widget.SeekBar;
+
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.annotation.RequiresApi;
+
+/**
+ * [一句话功能简述]<BR>
+ * [功能详细描述]<BR>
+ *
+ * @author zWX921533
+ * @version [V8.20.8.1, 2020/4/18]
+ * @since V8.20.8.1
+ */
+public class MediaPlayerActivity extends Activity implements View.OnClickListener {
+
+    MediaPlayer mMediaPlayer;
+    private SeekBar mSeekBar;
+
+    private Handler mHandler = new Handler(){
+        @Override
+        public void handleMessage(@NonNull Message msg) {
+            if (mMediaPlayer != null){
+                int progress = (int) (0.1*mMediaPlayer.getCurrentPosition()/mMediaPlayer.getDuration() * 1000);
+                mSeekBar.setProgress(progress);
+                mHandler.sendEmptyMessageDelayed(1,1000);
+            }
+        }
+    };
+    private Button mLoopBtn;
+    private boolean isLoop;
+    @Override
+    protected void onCreate(@Nullable Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_media);
+        init();
+        initView();
+    }
+
+    private void initView() {
+        mSeekBar = findViewById(R.id.seek_bar);
+        findViewById(R.id.btn_play).setOnClickListener(this);
+        findViewById(R.id.btn_stop).setOnClickListener(this);
+        mLoopBtn = findViewById(R.id.btn_loop);
+        mLoopBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (isLoop){
+                    isLoop = false;
+                    mLoopBtn.setText("不循环播放");
+                }else {
+                    isLoop = true;
+                    mLoopBtn.setText("循环播放");
+                }
+                mMediaPlayer.setLooping(isLoop);
+            }
+        });
+        mSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+//                int duration = mMediaPlayer.getDuration();//播放时长（单位毫秒）
+//                int curProsition = mMediaPlayer.getCurrentPosition();//当前进度（单位毫秒）
+                if (fromUser){
+                    Log.d("zzy:","====== progress: " + seekBar.getProgress() + "  duration:" + mMediaPlayer.getDuration());
+                    int seekDuration = progress * mMediaPlayer.getDuration() / 100;
+                    mMediaPlayer.seekTo(seekDuration);
+                }
+
+
+//                mMediaPlayer.seekTo();
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {
+
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+
+            }
+        });
+        RadioGroup group = (RadioGroup) findViewById(R.id.rg);
+        group.setOnCheckedChangeListener(new RadioGroup.OnCheckedChangeListener() {
+            @RequiresApi(api = Build.VERSION_CODES.M)
+            @Override
+            public void onCheckedChanged(RadioGroup group, int checkedId) {
+                float speed = 1.0f;
+                switch (checkedId) {
+                    case R.id.rb_75:
+                        speed = 0.75f;
+                        break;
+                    case R.id.rb_1:
+                        speed = 1.0f;
+                        break;
+                    case R.id.rb_15:
+                        speed = 1.5f;
+                        break;
+                    case R.id.rb_20:
+                        speed = 2.0f;
+                        break;
+                }
+                mMediaPlayer.setPlaybackParams(mMediaPlayer.getPlaybackParams().setSpeed(speed));
+            }
+        });
+    }
+
+    private void init(){
+        mMediaPlayer = MediaPlayer.create(this, R.raw.am1r);
+        mMediaPlayer.setAudioStreamType(AudioManager.STREAM_MUSIC);
+        //在Service中使用时候，设置唤醒锁定，保证播放功能能够继续使用
+        mMediaPlayer.setWakeMode(this, PowerManager.PARTIAL_WAKE_LOCK);
+        //锁定WIFI网络， 暂停或者不用的时候wifiLock.release();
+        WifiManager.WifiLock wifiLock =
+                ((WifiManager)getSystemService(Context.WIFI_SERVICE)).createWifiLock(WifiManager.WIFI_MODE_FULL,"mylock");
+        wifiLock.acquire();
+
+        //加载监听
+        mMediaPlayer.setOnPreparedListener(new MyOnPreparedListener());
+        //播放完成监听
+        mMediaPlayer.setOnCompletionListener(new MyOnCompletionListener());
+        //播放错误监听
+        mMediaPlayer.setOnErrorListener(new MyOnErrorListener());
+        //播放完成监听
+        mMediaPlayer.setOnSeekCompleteListener(new MyOnSeekCompleteListener());
+        //网络播放时，缓冲回调接口
+        mMediaPlayer.setOnBufferingUpdateListener(new MediaPlayer.OnBufferingUpdateListener() {
+
+            @Override
+            public void onBufferingUpdate(MediaPlayer mp, int percent) {
+                Log.i("tah","======= percent: "  + percent + "   currentDuration: " + mp.getCurrentPosition());
+            }
+        });
+        //媒体播放的信息或警告回调，返回true表示处理了
+        mMediaPlayer.setOnInfoListener(new MediaPlayer.OnInfoListener() {
+
+            @Override
+            public boolean onInfo(MediaPlayer mp, int what, int extra) {
+                return false;
+            }
+        });
+
+//        mMediaPlayer.setWakeMode();
+        //setPlaybackParams 设置播放速度等
+//        mMediaPlayer.setDataSource();
+    }
+
+    private boolean isPlay;
+    private boolean isCompletion;
+
+    @Override
+    public void onClick(View view) {
+        switch (view.getId()) {
+            case R.id.btn_play:
+                //异步加载
+//                mMediaPlayer.reset();
+                if (isCompletion){
+                    mMediaPlayer.start();
+                    return;
+                }
+                if (!isPlay){
+                    mMediaPlayer.start();
+                }
+
+                break;
+            case R.id.btn_stop:
+                mMediaPlayer.pause();
+                isPlay = false;
+                break;
+            default:break;
+        }
+    }
+
+    /**
+     * 设置进度监听
+     */
+    private class MyOnSeekCompleteListener implements MediaPlayer.OnSeekCompleteListener{
+
+        @Override
+        public void onSeekComplete(MediaPlayer mp) {
+            Log.e("tag","======== onSeekComplete: " + mp.getCurrentPosition());
+        }
+    }
+
+    /**
+     * 播放错误监听
+     */
+    private class MyOnErrorListener implements MediaPlayer.OnErrorListener{
+
+        @Override
+        public boolean onError(MediaPlayer mp, int what, int extra) {
+            //出现错误时 MediaPlayer 会进入 Error 状态
+            //必须先进行重置(reset)，才能再次使用
+            Log.e("tag","======== onError: ");
+            return false;
+        }
+    }
+
+    /**
+     * 播放完成监听
+     */
+    private class MyOnCompletionListener implements MediaPlayer.OnCompletionListener {
+        @Override
+        public void onCompletion(MediaPlayer mp) {
+            //播放完成监听，设置循环播放，播放完不会进入此监听
+            Log.e("tag","======== onCompletion: ");
+            isCompletion = true;
+
+        }
+    }
+
+    /**
+     * 加载流文件监听
+     */
+    private class MyOnPreparedListener implements MediaPlayer.OnPreparedListener {
+
+        @Override
+        public void onPrepared(MediaPlayer mp) {
+            Log.e("tag","======== onPrepared: ");
+            //加载完成，开始播放
+            mMediaPlayer.start();
+            isPlay = true;
+            isCompletion = false;
+            mHandler.sendEmptyMessage(1);
+        }
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (mMediaPlayer !=null){
+            mMediaPlayer.stop();
+            mMediaPlayer.release();
+            mMediaPlayer = null;
+        }
+        mHandler.removeMessages(1);
+        super.onDestroy();
+    }
+}
