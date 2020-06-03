@@ -1,0 +1,2349 @@
+### Activity启动流程
+
+`startActivity`
+
+#### 1、Activity & `startActivityForResult()`
+
+```java
+    public void startActivityForResult(@RequiresPermission Intent intent, int requestCode,
+            @Nullable Bundle options) {
+        if (mParent == null) {
+            options = transferSpringboardActivityOptions(options);
+            Instrumentation.ActivityResult ar =
+                mInstrumentation.execStartActivity(
+                    this, mMainThread.getApplicationThread(), mToken, this,
+                    intent, requestCode, options);
+            if (ar != null) {
+                mMainThread.sendActivityResult(
+                    mToken, mEmbeddedID, requestCode, ar.getResultCode(),
+                    ar.getResultData());
+            }
+            if (requestCode >= 0) {
+                // If this start is requesting a result, we can avoid making
+                // the activity visible until the result is received.  Setting
+                // this code during onCreate(Bundle savedInstanceState) or onResume() will keep the
+                // activity hidden during this time, to avoid flickering.
+                // This can only be done when a result is requested because
+                // that guarantees we will get information back when the
+                // activity is finished, no matter what happens to it.
+                mStartedActivity = true;
+            }
+
+            cancelInputsAndStartExitTransition(options);
+            // TODO Consider clearing/flushing other event sources and events for child windows.
+        } else {
+            if (options != null) {
+                mParent.startActivityFromChild(this, intent, requestCode, options);
+            } else {
+                // Note we want to go through this method for compatibility with
+                // existing applications that may have overridden it.
+                mParent.startActivityFromChild(this, intent, requestCode);
+            }
+        }
+    }
+```
+
+#### 2、Instrumentation & execStartActivity()
+
+```java
+    public ActivityResult execStartActivity(
+            Context who, IBinder contextThread, IBinder token, Activity target,
+            Intent intent, int requestCode, Bundle options) {
+        IApplicationThread whoThread = (IApplicationThread) contextThread;
+        Uri referrer = target != null ? target.onProvideReferrer() : null;
+	   ...
+        try {
+            intent.migrateExtraStreamToClipData();
+            intent.prepareToLeaveProcess();
+            int result = ActivityManagerNative.getDefault()
+                .startActivity(whoThread, who.getBasePackageName(), intent,
+                        intent.resolveTypeIfNeeded(who.getContentResolver()),
+                        token, target != null ? target.mEmbeddedID : null,
+                        requestCode, 0, null, options);
+            checkStartActivityResult(result, intent);
+        } catch (RemoteException e) {
+            throw new RuntimeException("Failure from system", e);
+        }
+        return null;
+    }
+```
+
+此方式会执行 `ActivityManagerNative.getDefault().startActivity()` 方法。 
+
+#### 3、ActivityManagerNative & getDefault()
+
+```java
+    /**
+     * Retrieve the system's default/global activity manager.
+     */
+    static public IActivityManager getDefault() {
+        return gDefault.get();
+    }
+
+    private static final Singleton<IActivityManager> gDefault = new Singleton<IActivityManager>() {
+        protected IActivityManager create() {
+            //获得ActivityManagerServer服务
+            IBinder b = ServiceManager.getService("activity");
+            if (false) {
+                Log.v("ActivityManager", "default service binder = " + b);
+            }
+            IActivityManager am = asInterface(b);
+            if (false) {
+                Log.v("ActivityManager", "default service = " + am);
+            }
+            return am;
+        }
+    };
+
+```
+
+可以看到 `getDefault()` 返回的是一个单例的 `IActivityManager` 对象。
+
+`gDefault` 的 `create()` 方法中做了两件事情：
+
+- 通过 `ServiceManager.getService("activity")` 获得 `ActivityManagerService` 服务
+- 调用 `asInterface(b)` 获得 `IActivityManager` 对象，参数`b`就是上面获得的`ActivityManagerService` 服务
+
+`asInterface()` 源码如下：
+
+```java
+    static public IActivityManager asInterface(IBinder obj) {
+        if (obj == null) {
+            return null;
+        }
+        IActivityManager in =
+            (IActivityManager)obj.queryLocalInterface(descriptor);
+        if (in != null) {
+            return in;
+        }
+
+        return new ActivityManagerProxy(obj);
+    }
+```
+
+通过 `new ActivityManagerProxy(obj)` 方式创建 `IActivityManager` 对象，并将 `AMS`传入
+
+`ActivityManagerProxy` 部分源码如下：
+
+```java
+class ActivityManagerProxy implements IActivityManager
+{
+    public ActivityManagerProxy(IBinder remote)
+    {
+        mRemote = remote;
+    }
+
+    public IBinder asBinder()
+    {
+        return mRemote;
+    }
+    ...
+}
+```
+
+可以看到 `ActivityManagerProxy` 是 `IActivityManager` 的实现类。其中 `IActivityManager` 又继承 `IInterface`。
+
+`remote` 就是上面获得的 `ActivityManagerService` 服务
+
+```java
+public interface IActivityManager extends IInterface {
+    ...
+}
+```
+
+因此 `ActivityManagerNative.getDefault()` 得到的是一个 `ActivityManagerProxy` 对象， `ActivityManagerNative.getDefault().startActivity()` 即  `ActivityManagerProxy.startActivity()`
+
+#### 4、ActivityManagerProxy & startActivity()
+
+```java
+    public int startActivity(IApplicationThread caller, String callingPackage, Intent intent,
+            String resolvedType, IBinder resultTo, String resultWho, int requestCode,
+            int startFlags, ProfilerInfo profilerInfo, Bundle options) throws RemoteException {
+        Parcel data = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        data.writeInterfaceToken(IActivityManager.descriptor);
+        data.writeStrongBinder(caller != null ? caller.asBinder() : null);
+        data.writeString(callingPackage);
+        intent.writeToParcel(data, 0);
+        data.writeString(resolvedType);
+        data.writeStrongBinder(resultTo);
+        data.writeString(resultWho);
+        data.writeInt(requestCode);
+        data.writeInt(startFlags);
+        if (profilerInfo != null) {
+            data.writeInt(1);
+            profilerInfo.writeToParcel(data, Parcelable.PARCELABLE_WRITE_RETURN_VALUE);
+        } else {
+            data.writeInt(0);
+        }
+        if (options != null) {
+            data.writeInt(1);
+            options.writeToParcel(data, 0);
+        } else {
+            data.writeInt(0);
+        }
+        mRemote.transact(START_ACTIVITY_TRANSACTION, data, reply, 0);
+        reply.readException();
+        int result = reply.readInt();
+        reply.recycle();
+        data.recycle();
+        return result;
+    }
+
+```
+
+在该方法中，会向`data`中写入启动Activity需要的参数，并调用`mRemote.transact`方法，通过Binder实现跨进程通信，进入`ActivityManagerNative` 中。
+
+```java
+    @Override
+    public boolean onTransact(int code, Parcel data, Parcel reply, int flags)
+            throws RemoteException {
+        switch (code) {
+        case START_ACTIVITY_TRANSACTION:
+        {
+            data.enforceInterface(IActivityManager.descriptor);
+            IBinder b = data.readStrongBinder();
+            IApplicationThread app = ApplicationThreadNative.asInterface(b);
+            String callingPackage = data.readString();
+            Intent intent = Intent.CREATOR.createFromParcel(data);
+            String resolvedType = data.readString();
+            IBinder resultTo = data.readStrongBinder();
+            String resultWho = data.readString();
+            int requestCode = data.readInt();
+            int startFlags = data.readInt();
+            ProfilerInfo profilerInfo = data.readInt() != 0
+                    ? ProfilerInfo.CREATOR.createFromParcel(data) : null;
+            Bundle options = data.readInt() != 0
+                    ? Bundle.CREATOR.createFromParcel(data) : null;
+            int result = startActivity(app, callingPackage, intent, resolvedType,
+                    resultTo, resultWho, requestCode, startFlags, profilerInfo, options);
+            reply.writeNoException();
+            reply.writeInt(result);
+            return true;
+        }
+	}
+```
+
+然后进入AMS的`startActivity`方法
+
+#### 5、ActivityManagerService & startActivity()
+
+```java
+public final class ActivityManagerService extends ActivityManagerNative
+        implements Watchdog.Monitor, BatteryStatsImpl.BatteryCallback {
+	...
+}
+```
+
+可以看到 `ActivityManagerService` 是继承 `ActivityManagerNative` 的。
+
+而 `ActivityManagerNative`  又继承 `Binder` 所以具有跨进程通信的能力。
+
+继承关系：
+
+```java
+ActivityManagerService -> ActivityManagerNative -> Binder & (implements) IActivityManager
+```
+
+```java
+ActivityManagerProxy -> (implements) IActivityManager-> (implements) IInterface
+```
+
+可以看到 `ActivityManagerService` 和 `ActivityManagerProxy` 都实现了 `IActivityManager` 接口。
+
+AMS `startActivity` 源码如下：
+
+```java
+    @Override
+    public final int startActivity(IApplicationThread caller, String callingPackage,
+            Intent intent, String resolvedType, IBinder resultTo, String resultWho, int requestCode,
+            int startFlags, ProfilerInfo profilerInfo, Bundle options) {
+        return startActivityAsUser(caller, callingPackage, intent, resolvedType, resultTo,
+            resultWho, requestCode, startFlags, profilerInfo, options,
+            UserHandle.getCallingUserId());
+    }
+
+```
+
+继续执行 `startActivityAsUser` 
+
+```java
+    @Override
+    public final int startActivityAsUser(IApplicationThread caller, String callingPackage,
+            Intent intent, String resolvedType, IBinder resultTo, String resultWho, int requestCode,
+            int startFlags, ProfilerInfo profilerInfo, Bundle options, int userId) {
+        enforceNotIsolatedCaller("startActivity");
+        userId = handleIncomingUser(Binder.getCallingPid(), Binder.getCallingUid(), userId,
+                false, ALLOW_FULL_ONLY, "startActivity", null);
+        // TODO: Switch to user app stacks here.
+        return mStackSupervisor.startActivityMayWait(caller, -1, callingPackage, intent,
+                resolvedType, null, null, resultTo, resultWho, requestCode, startFlags,
+                profilerInfo, null, null, options, false, userId, null, null);
+    }
+```
+
+此方法会调用 `ActivityStackSupervisor` 的 `startActivityMayWait` 方法切换到用户应用程序堆栈。
+
+#### 6、ActivityStackSupervisor & startActivityMayWait()
+
+```java
+    final int startActivityMayWait(IApplicationThread caller, int callingUid,
+            String callingPackage, Intent intent, String resolvedType,
+            IVoiceInteractionSession voiceSession, IVoiceInteractor voiceInteractor,
+            IBinder resultTo, String resultWho, int requestCode, int startFlags,
+            ProfilerInfo profilerInfo, WaitResult outResult, Configuration config,
+            Bundle options, boolean ignoreTargetSecurity, int userId,
+            IActivityContainer iContainer, TaskRecord inTask) {
+        
+           ActivityInfo aInfo = resolveActivity(intent, resolvedType, startFlags, profilerInfo, userId);
+    	...
+        synchronized (mService) { 
+        	...
+            int res = startActivityLocked(caller, intent, resolvedType, aInfo,
+                    voiceSession, voiceInteractor, resultTo, resultWho,
+                    requestCode, callingPid, callingUid, callingPackage,
+                    realCallingPid, realCallingUid, startFlags, options, ignoreTargetSecurity,
+                    componentSpecified, null, container, inTask);
+            ...
+            return res;
+        } 
+    }
+```
+
+该方法主要是获取`ActivityInfo`信息，继续执行 `startActivityLocked`
+
+```java
+    final int startActivityLocked(IApplicationThread caller,
+            Intent intent, String resolvedType, ActivityInfo aInfo,
+            IVoiceInteractionSession voiceSession, IVoiceInteractor voiceInteractor,
+            IBinder resultTo, String resultWho, int requestCode,
+            int callingPid, int callingUid, String callingPackage,
+            int realCallingPid, int realCallingUid, int startFlags, Bundle options,
+            boolean ignoreTargetSecurity, boolean componentSpecified, ActivityRecord[] outActivity,
+            ActivityContainer container, TaskRecord inTask) {
+        int err = ActivityManager.START_SUCCESS;
+    	...
+        err = startActivityUncheckedLocked(r, sourceRecord, voiceSession, voiceInteractor,
+                startFlags, true, options, inTask);
+        ...
+        return err;
+    }
+```
+
+`startActivityLocked` 主要是创建一个 `ActivityRecord` 对象，保存Activity启动信息。
+
+```java
+    final int startActivityUncheckedLocked(final ActivityRecord r, ActivityRecord sourceRecord,
+            IVoiceInteractionSession voiceSession, IVoiceInteractor voiceInteractor, int startFlags,
+            boolean doResume, Bundle options, TaskRecord inTask) {
+    	...
+        // 获得Activity启动模式
+        final boolean launchSingleTop = r.launchMode == ActivityInfo.LAUNCH_SINGLE_TOP;
+        final boolean launchSingleInstance = r.launchMode == ActivityInfo.LAUNCH_SINGLE_INSTANCE;
+        final boolean launchSingleTask = r.launchMode == ActivityInfo.LAUNCH_SINGLE_TASK;
+	    // 处理启动参数FLAG_ACTIVITY_NEW_DOCUMENT
+        int launchFlags = intent.getFlags();
+        if ((launchFlags & Intent.FLAG_ACTIVITY_NEW_DOCUMENT) != 0 &&
+                (launchSingleInstance || launchSingleTask)) {
+            ...
+        } else {
+            ...
+        }
+	    // 是否为后台启动标志位
+        final boolean launchTaskBehind = r.mLaunchTaskBehind
+                && !launchSingleTask && !launchSingleInstance
+                && (launchFlags & Intent.FLAG_ACTIVITY_NEW_DOCUMENT) != 0;
+	    
+        if (r.resultTo != null && (launchFlags & Intent.FLAG_ACTIVITY_NEW_TASK) != 0
+                && r.resultTo.task.stack != null) {
+            Slog.w(TAG, "Activity is launching as a new task, so cancelling activity result.");
+            // 如果Activity是在一个新的任务中启动，则resultTo失效
+            r.resultTo.task.stack.sendActivityResultLocked(-1,
+                    r.resultTo, r.resultWho, r.requestCode,
+                    Activity.RESULT_CANCELED, null);
+            r.resultTo = null;
+        }
+	    // 如果启动参数包含FLAG_ACTIVITY_NEW_DOCUMENT，resultTo为null，则在新任务中启动
+        if ((launchFlags & Intent.FLAG_ACTIVITY_NEW_DOCUMENT) != 0 && r.resultTo == null) {
+            launchFlags |= Intent.FLAG_ACTIVITY_NEW_TASK;
+        }
+
+        if ((launchFlags & Intent.FLAG_ACTIVITY_NEW_TASK) != 0) {
+            if (launchTaskBehind
+                    || r.info.documentLaunchMode == ActivityInfo.DOCUMENT_LAUNCH_ALWAYS) {
+                launchFlags |= Intent.FLAG_ACTIVITY_MULTIPLE_TASK;
+            }
+        }
+
+        mUserLeaving = (launchFlags & Intent.FLAG_ACTIVITY_NO_USER_ACTION) == 0;
+
+        if (!doResume) {
+            r.delayedResume = true;
+        }
+	    //FLAG_ACTIVITY_PREVIOUS_IS_TOP用于一些特殊场景：带启动Activity不会被作为栈顶
+        //即：调用者希望待启动的Activity马上销毁，则使用该启动参数
+        //通常情况，notTop为null
+        ActivityRecord notTop =
+                (launchFlags & Intent.FLAG_ACTIVITY_PREVIOUS_IS_TOP) != 0 ? r : null;
+		
+        if ((startFlags&ActivityManager.START_FLAG_ONLY_IF_NEEDED) != 0) {
+            ActivityRecord checkedCaller = sourceRecord;
+            if (checkedCaller == null) {
+                checkedCaller = mFocusedStack.topRunningNonDelayedActivityLocked(notTop);
+            }
+            if (!checkedCaller.realActivity.equals(r.realActivity)) {
+                // 调用者与启动的Activity不相同时，设置此标签
+                startFlags &= ~ActivityManager.START_FLAG_ONLY_IF_NEEDED;
+            }
+        }
+
+        boolean addingToTask = false;//表示是否在传入的inTask中启动Activity
+        TaskRecord reuseTask = null;//用来复用任务。如果inTask存在，则inTask可以作为reuseTask
+        
+        if (sourceRecord == null && inTask != null && inTask.stack != null) {
+		   ... //sourceRecord 不为空，不进入该方法
+            reuseTask = inTask;
+        } else {
+            inTask = null;
+        }
+        
+        //根据调用者和目标Activity的启动模式，来调整目标Activity的启动参数
+        if (inTask == null) {
+            if (sourceRecord == null) {
+                // sourceRecord == null，表示调用者不是Activity
+                // 则强制在新的Task中启动Activity
+                if ((launchFlags & Intent.FLAG_ACTIVITY_NEW_TASK) == 0 && inTask == null) {
+                    launchFlags |= Intent.FLAG_ACTIVITY_NEW_TASK;
+                }
+            } else if (sourceRecord.launchMode == ActivityInfo.LAUNCH_SINGLE_INSTANCE) {
+                // 如果调用者的启动模式为singleInstance，则需要在新的Task中启动Activity
+                launchFlags |= Intent.FLAG_ACTIVITY_NEW_TASK;
+            } else if (launchSingleInstance || launchSingleTask) {
+                // 如果目标Activity的启动模式为singleInstance或singleTask，需要在新的Task中启动
+                launchFlags |= Intent.FLAG_ACTIVITY_NEW_TASK;
+            }
+        }
+       // 以上完成对Activity启动参数进行校验和设置
+        
+        ActivityInfo newTaskInfo = null;
+        Intent newTaskIntent = null;
+        ActivityStack sourceStack;
+        if (sourceRecord != null) {
+            if (sourceRecord.finishing) {
+                // 如果调用者处于即将finish状态,那意味着其所在的Task也可能会被销毁
+                // 待启动的Activity需要保留已有任务的信息，并强制在新的任务中启动
+                if ((launchFlags & Intent.FLAG_ACTIVITY_NEW_TASK) == 0) {
+                    launchFlags |= Intent.FLAG_ACTIVITY_NEW_TASK;
+                    newTaskInfo = sourceRecord.info;
+                    newTaskIntent = sourceRecord.task.intent;
+                }
+                sourceRecord = null;
+                sourceStack = null;
+            } else {
+                // 当调用者Activity不为空，且不处于finishing状态，则复用其栈
+                sourceStack = sourceRecord.task.stack;
+            }
+        } else {
+            sourceStack = null;
+        } 
+        
+        boolean movedHome = false;
+        ActivityStack targetStack; // 目标Activity的宿主栈 
+
+        intent.setFlags(launchFlags);// 设置修正后的launchFlags
+        // 是否有启动动画
+        final boolean noAnimation = (launchFlags & Intent.FLAG_ACTIVITY_NO_ANIMATION) != 0;
+
+        if (((launchFlags & Intent.FLAG_ACTIVITY_NEW_TASK) != 0 &&
+                (launchFlags & Intent.FLAG_ACTIVITY_MULTIPLE_TASK) == 0)
+                || launchSingleInstance || launchSingleTask) {
+            // 进入此分支，意味着不是在当前任务中启动Activity，需要查询目标Task是否存在
+            if (inTask == null && r.resultTo == null) {
+                // 查找目标Activity
+                ActivityRecord intentActivity = !launchSingleInstance ?
+                        findTaskLocked(r) : findActivityLocked(intent, r.info);
+                if (intentActivity != null) {
+                    // intentActivity不为空，表示找到了目标Activity
+                    if (isLockTaskModeViolation(intentActivity.task,
+                            (launchFlags & (FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TASK))
+                            == (FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TASK))) {
+                        showLockTaskToast();
+                        Slog.e(TAG, "startActivityUnchecked: Attempt to violate Lock Task Mode");
+                        return ActivityManager.START_RETURN_LOCK_TASK_MODE_VIOLATION;
+                    }
+                    if (r.task == null) {
+                        r.task = intentActivity.task;
+                    }
+                    if (intentActivity.task.intent == null) {
+                        intentActivity.task.setIntent(r);
+                    }
+                    // 设置目标栈 targetStack
+                    targetStack = intentActivity.task.stack;
+                    targetStack.mLastPausedActivity = null;
+                    // 获得当前焦点栈
+                    final ActivityStack focusStack = getFocusedStack();
+                    // 获得当前可见的ActivityRecord
+                    ActivityRecord curTop = (focusStack == null)
+                            ? null : focusStack.topRunningNonDelayedActivityLocked(notTop);
+                    boolean movedToFront = false;
+                    if (curTop != null && (curTop.task != intentActivity.task ||
+                            curTop.task != focusStack.topTask())) {
+                        // 进入此分支，表示当前可见Activity和待启动Activity不在同一个任务栈
+                        // 需要将宿主栈移至前台
+                        r.intent.addFlags(Intent.FLAG_ACTIVITY_BROUGHT_TO_FRONT);
+                        if (sourceRecord == null || (sourceStack.topActivity() != null &&
+                                sourceStack.topActivity().task == sourceRecord.task)) {
+                            // We really do want to push this one into the user's face, right now.
+                            if (launchTaskBehind && sourceRecord != null) {
+                                intentActivity.setTaskToAffiliateWith(sourceRecord.task);
+                            }
+                            movedHome = true;
+                            // 将目标Activity所在的任务栈移至栈顶
+                            targetStack.moveTaskToFrontLocked(intentActivity.task, noAnimation,
+                                    options, r.appTimeTracker, "bringingFoundTaskToFront");
+                            movedToFront = true;
+                            if ((launchFlags &
+                                    (FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_TASK_ON_HOME))
+                                    == (FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_TASK_ON_HOME)) {
+                                // 将toReturnTo设置为home
+                                intentActivity.task.setTaskToReturnTo(HOME_ACTIVITY_TYPE);
+                            }
+                            options = null;
+                        }
+                    }
+                    if (!movedToFront) {
+                        targetStack.moveToFront("intentActivityFound");
+                    }
+
+                    if ((launchFlags&Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED) != 0) {
+                        // 重置目标task
+                        intentActivity = targetStack.resetTaskIfNeededLocked(intentActivity, r);
+                    }
+                    if ((startFlags & ActivityManager.START_FLAG_ONLY_IF_NEEDED) != 0) {
+                        
+                        if (doResume) {
+                            resumeTopActivitiesLocked(targetStack, null, options);
+                            // 如果没有移至前台，则通知Keyguard
+                            if (!movedToFront) {
+                                notifyActivityDrawnForKeyguard();
+                            }
+                        } else {
+                            ActivityOptions.abort(options);
+                        }
+                        return ActivityManager.START_RETURN_INTENT_TO_CALLER;
+                    }
+                    if ((launchFlags & (FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TASK))
+                            == (FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TASK)) {
+                        reuseTask = intentActivity.task;
+                        reuseTask.performClearTaskLocked();
+                        reuseTask.setIntent(r);
+                    } else if ((launchFlags & FLAG_ACTIVITY_CLEAR_TOP) != 0
+                            || launchSingleInstance || launchSingleTask) {
+                        ActivityRecord top =
+                                intentActivity.task.performClearTaskLocked(r, launchFlags);
+                        if (top != null) {
+                            if (top.frontOfTask) {              
+                                top.task.setIntent(r);
+                            }
+                            ActivityStack.logStartActivity(EventLogTags.AM_NEW_INTENT,
+                                    r, top.task);
+                            // 触发onNewIntent()
+                            top.deliverNewIntentLocked(callingUid, r.intent, r.launchedFromPackage);
+                        } else {
+                            addingToTask = true;
+                            sourceRecord = intentActivity;
+                            TaskRecord task = sourceRecord.task;
+                            if (task != null && task.stack == null) {
+                                targetStack = computeStackFocus(sourceRecord, false /* newTask */);
+                                targetStack.addTask(
+                                        task, !launchTaskBehind /* toTop */, false /* moving */);
+                            }
+
+                        }
+                    } else if (r.realActivity.equals(intentActivity.task.realActivity)) {             
+                        if (((launchFlags&Intent.FLAG_ACTIVITY_SINGLE_TOP) != 0 || launchSingleTop)
+                                && intentActivity.realActivity.equals(r.realActivity)) {
+                            ActivityStack.logStartActivity(EventLogTags.AM_NEW_INTENT, r,
+                                    intentActivity.task);
+                            if (intentActivity.frontOfTask) {
+                                intentActivity.task.setIntent(r);
+                            }
+                            // 触发onNewIntent()
+                            intentActivity.deliverNewIntentLocked(callingUid, r.intent,
+                                    r.launchedFromPackage);
+                        } else if (!r.intent.filterEquals(intentActivity.task.intent)) { 
+                            addingToTask = true;
+                            sourceRecord = intentActivity;
+                        }
+                    } else if ((launchFlags&Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED) == 0) {       
+                        addingToTask = true;
+                        sourceRecord = intentActivity;
+                    } else if (!intentActivity.task.rootWasReset) {                   
+                        intentActivity.task.setIntent(r);
+                    }
+                    if (!addingToTask && reuseTask == null) {                    
+                        if (doResume) {
+                            targetStack.resumeTopActivityLocked(null, options);
+                            if (!movedToFront) {                     
+                                notifyActivityDrawnForKeyguard();
+                            }
+                        } else {
+                            ActivityOptions.abort(options);
+                        }
+                        return ActivityManager.START_TASK_TO_FRONT;
+                    }
+                }
+            }
+        }
+
+        if (r.packageName != null) {
+            ActivityStack topStack = mFocusedStack;
+            ActivityRecord top = topStack.topRunningNonDelayedActivityLocked(notTop);
+            if (top != null && r.resultTo == null) {
+                // 当启动的Activity和前台显示的是同一个的情况
+                if (top.realActivity.equals(r.realActivity) && top.userId == r.userId) {
+                    if (top.app != null && top.app.thread != null) {
+                        if ((launchFlags & Intent.FLAG_ACTIVITY_SINGLE_TOP) != 0
+                            || launchSingleTop || launchSingleTask) {
+                            ActivityStack.logStartActivity(EventLogTags.AM_NEW_INTENT, top,
+                                    top.task);
+                            topStack.mLastPausedActivity = null;
+                            if (doResume) {
+                                resumeTopActivitiesLocked();
+                            }
+                            ActivityOptions.abort(options);
+                            if ((startFlags&ActivityManager.START_FLAG_ONLY_IF_NEEDED) != 0) {       
+                                return ActivityManager.START_RETURN_INTENT_TO_CALLER;
+                            }
+                            // 触发onNewIntent()
+                            top.deliverNewIntentLocked(callingUid, r.intent, r.launchedFromPackage);
+                            return ActivityManager.START_DELIVERED_TO_TOP;
+                        }
+                    }
+                }
+            }
+        } else {
+            // 包名为null，表示找不到待启动的Activity
+            if (r.resultTo != null && r.resultTo.task.stack != null) {
+                r.resultTo.task.stack.sendActivityResultLocked(-1, r.resultTo, r.resultWho,
+                        r.requestCode, Activity.RESULT_CANCELED, null);
+            }
+            ActivityOptions.abort(options);
+            return ActivityManager.START_CLASS_NOT_FOUND;
+        }
+	   //以上主要处理在一个新的task中启动Activity，并且Activity已经存在的情况
+        
+        // 处理目标Activity不存在的情况
+        boolean newTask = false;
+        boolean keepCurTransition = false;
+
+        TaskRecord taskToAffiliate = launchTaskBehind && sourceRecord != null ?
+                sourceRecord.task : null;
+		
+        if (r.resultTo == null && inTask == null && !addingToTask
+                && (launchFlags & Intent.FLAG_ACTIVITY_NEW_TASK) != 0) {
+            // 进入此分支，表示要在新的Task中启动Activity
+            newTask = true;
+            targetStack = computeStackFocus(r, newTask);
+            targetStack.moveToFront("startingNewTask");
+
+            if (reuseTask == null) {
+                // 如果不存在可以复用的Task，重新创建
+                r.setTask(targetStack.createTaskRecord(getNextTaskId(),
+                        newTaskInfo != null ? newTaskInfo : r.info,
+                        newTaskIntent != null ? newTaskIntent : intent,
+                        voiceSession, voiceInteractor, !launchTaskBehind /* toTop */),
+                        taskToAffiliate);
+            } else {
+                r.setTask(reuseTask, taskToAffiliate);
+            }
+            if (isLockTaskModeViolation(r.task)) {
+                Slog.e(TAG, "Attempted Lock Task Mode violation r=" + r);
+                return ActivityManager.START_RETURN_LOCK_TASK_MODE_VIOLATION;
+            }
+            if (!movedHome) {
+                if ((launchFlags &
+                        (FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_TASK_ON_HOME))
+                        == (FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_TASK_ON_HOME)) {
+                    r.task.setTaskToReturnTo(HOME_ACTIVITY_TYPE);
+                }
+            }
+        } else if (sourceRecord != null) {
+            // 处理宿主栈就是调用者Activity所在的ActivityStack
+            // 需要将宿主任务移到栈顶，并对launchFlags做调整
+            final TaskRecord sourceTask = sourceRecord.task;
+            if (isLockTaskModeViolation(sourceTask)) {
+                return ActivityManager.START_RETURN_LOCK_TASK_MODE_VIOLATION;
+            }
+            targetStack = sourceTask.stack;
+            targetStack.moveToFront("sourceStackToFront");
+            final TaskRecord topTask = targetStack.topTask();
+            if (topTask != sourceTask) {
+                targetStack.moveTaskToFrontLocked(sourceTask, noAnimation, options,
+                        r.appTimeTracker, "sourceTaskToFront");
+            }
+            if (!addingToTask && (launchFlags&Intent.FLAG_ACTIVITY_CLEAR_TOP) != 0) {
+                ActivityRecord top = sourceTask.performClearTaskLocked(r, launchFlags);
+                keepCurTransition = true;
+                if (top != null) {
+                    ActivityStack.logStartActivity(EventLogTags.AM_NEW_INTENT, r, top.task);
+                    // 触发onNewIntent()
+                    top.deliverNewIntentLocked(callingUid, r.intent, r.launchedFromPackage);
+                    targetStack.mLastPausedActivity = null;
+                    if (doResume) {
+                        targetStack.resumeTopActivityLocked(null);
+                    }
+                    ActivityOptions.abort(options);
+                    return ActivityManager.START_DELIVERED_TO_TOP;
+                }
+            } else if (!addingToTask &&
+                    (launchFlags&Intent.FLAG_ACTIVITY_REORDER_TO_FRONT) != 0) {
+                final ActivityRecord top = sourceTask.findActivityInHistoryLocked(r);
+                if (top != null) {
+                    final TaskRecord task = top.task;
+                    task.moveActivityToFrontLocked(top);
+                    ActivityStack.logStartActivity(EventLogTags.AM_NEW_INTENT, r, task);
+                    top.updateOptionsLocked(options);
+                    top.deliverNewIntentLocked(callingUid, r.intent, r.launchedFromPackage);
+                    targetStack.mLastPausedActivity = null;
+                    if (doResume) {
+                        targetStack.resumeTopActivityLocked(null);
+                    }
+                    return ActivityManager.START_DELIVERED_TO_TOP;
+                }
+            }
+            r.setTask(sourceTask, null);
+        } else if (inTask != null) {
+            // 在指定的任务栈中启动Activity
+            if (isLockTaskModeViolation(inTask)) {
+                return ActivityManager.START_RETURN_LOCK_TASK_MODE_VIOLATION;
+            }
+            targetStack = inTask.stack;
+            targetStack.moveTaskToFrontLocked(inTask, noAnimation, options, r.appTimeTracker,
+                    "inTaskToFront");
+
+            ActivityRecord top = inTask.getTopActivity();
+            if (top != null && top.realActivity.equals(r.realActivity) && top.userId == r.userId) {
+                if ((launchFlags & Intent.FLAG_ACTIVITY_SINGLE_TOP) != 0
+                        || launchSingleTop || launchSingleTask) {
+                    ActivityStack.logStartActivity(EventLogTags.AM_NEW_INTENT, top, top.task);
+                    if ((startFlags&ActivityManager.START_FLAG_ONLY_IF_NEEDED) != 0) {
+                        return ActivityManager.START_RETURN_INTENT_TO_CALLER;
+                    }
+                    //触发onNewIntent()
+                    top.deliverNewIntentLocked(callingUid, r.intent, r.launchedFromPackage);
+                    return ActivityManager.START_DELIVERED_TO_TOP;
+                }
+            }
+
+            if (!addingToTask) {
+                ActivityOptions.abort(options);
+                return ActivityManager.START_TASK_TO_FRONT;
+            }
+
+            r.setTask(inTask, null);
+        } else {
+            targetStack = computeStackFocus(r, newTask);
+            targetStack.moveToFront("addingToTopTask");
+            ActivityRecord prev = targetStack.topActivity();
+            r.setTask(prev != null ? prev.task : targetStack.createTaskRecord(getNextTaskId(),
+                            r.info, intent, null, null, true), null);
+            mWindowManager.moveTaskToTop(r.task.taskId);
+        }
+        
+        mService.grantUriPermissionFromIntentLocked(callingUid, r.packageName,
+                intent, r.getUriPermissionsLocked(), r.userId);
+
+        if (sourceRecord != null && sourceRecord.isRecentsActivity()) {
+            r.task.setTaskToReturnTo(RECENTS_ACTIVITY_TYPE);
+        }
+        if (newTask) {
+            EventLog.writeEvent(EventLogTags.AM_CREATE_TASK, r.userId, r.task.taskId);
+        }
+        ActivityStack.logStartActivity(EventLogTags.AM_CREATE_ACTIVITY, r, r.task);
+        targetStack.mLastPausedActivity = null;
+        // 创建Activity
+        targetStack.startActivityLocked(r, newTask, doResume, keepCurTransition, options);
+        if (!launchTaskBehind) {
+            mService.setFocusedActivityLocked(r, "startedActivity");
+        }
+        return ActivityManager.START_SUCCESS;
+    }
+```
+
+**startstartActivityUncheckedLocked()**  会对Activity的启动参数进行修正，并且根据启动参数查找目标Activity，如果能找到则视情况觉得是否将其移到前台，如果未找到则在宿主任务中启动新的Activity。
+
+#### 7、ActivityStack & startActivityLocked
+
+```java
+    final void startActivityLocked(ActivityRecord r, boolean newTask,
+            boolean doResume, boolean keepCurTransition, Bundle options) {
+        TaskRecord rTask = r.task;
+        final int taskId = rTask.taskId;
+        if (!r.mLaunchTaskBehind && (taskForIdLocked(taskId) == null || newTask)) {
+            // 进入该条件，表示主栈ActivityStack中没有历史任务，或者强制要求在一个新的Task中启动Activity
+            // 将任务插入宿主栈顶
+            insertTaskAtTop(rTask, r);
+            mWindowManager.moveTaskToTop(taskId);
+        }
+        TaskRecord task = null;
+        if (!newTask) {
+            // 进入该条件，表示在已有的任务中启动Activity
+            // startIt 表示是否需要启动Activity，当目标任务之上有全屏的Activity时，该标志位被置为false
+            boolean startIt = true;
+            for (int taskNdx = mTaskHistory.size() - 1; taskNdx >= 0; --taskNdx) {
+                task = mTaskHistory.get(taskNdx);
+                if (task.getTopActivity() == null) {
+                    // 该task所有activity都finishing
+                    continue;
+                }
+                if (task == r.task) {
+                    if (!startIt) {
+                        task.addActivityToTop(r);
+                        r.putInHistory();
+                        mWindowManager.addAppToken(task.mActivities.indexOf(r), r.appToken,
+                                r.task.taskId, mStackId, r.info.screenOrientation, r.fullscreen,
+                                (r.info.flags & ActivityInfo.FLAG_SHOW_FOR_ALL_USERS) != 0,
+                                r.userId, r.info.configChanges, task.voiceSession != null,
+                                r.mLaunchTaskBehind);
+                        if (VALIDATE_TOKENS) {
+                            validateAppTokensLocked();
+                        }
+                        ActivityOptions.abort(options);
+                        return;
+                    }
+                    break;
+                } else if (task.numFullscreen > 0) {
+                    // 如果目标任务之上的某个任务包含全屏显示的Activity，则不需要显示目标Activity
+                    startIt = false;
+                }
+            }
+        }
+	    // 以上将待显示的任务放到了宿主栈的栈顶位置
+        
+        if (task == r.task && mTaskHistory.indexOf(task) != (mTaskHistory.size() - 1)) {
+            mStackSupervisor.mUserLeaving = false;
+        }
+		
+        // 将待显示的ActivityRecord放到任务栈顶
+        task = r.task;
+        task.addActivityToTop(r);
+        task.setFrontOfTask();
+
+        r.putInHistory();
+        if (!isHomeStack() || numActivities() > 0) {
+            // 进入此分支，表示宿主栈中已经有Activity
+            boolean showStartingIcon = newTask;
+            ProcessRecord proc = r.app;
+            if (proc == null) {
+                proc = mService.mProcessNames.get(r.processName, r.info.applicationInfo.uid);
+            }
+            if (proc == null || proc.thread == null) {
+                showStartingIcon = true;
+            }
+            if ((r.intent.getFlags() & Intent.FLAG_ACTIVITY_NO_ANIMATION) != 0) {
+                mWindowManager.prepareAppTransition(AppTransition.TRANSIT_NONE, keepCurTransition);
+                mNoAnimActivities.add(r);
+            } else {
+                mWindowManager.prepareAppTransition(newTask
+                        ? r.mLaunchTaskBehind
+                                ? AppTransition.TRANSIT_TASK_OPEN_BEHIND
+                                : AppTransition.TRANSIT_TASK_OPEN
+                        : AppTransition.TRANSIT_ACTIVITY_OPEN, keepCurTransition);
+                mNoAnimActivities.remove(r);
+            }
+            mWindowManager.addAppToken(task.mActivities.indexOf(r),
+                    r.appToken, r.task.taskId, mStackId, r.info.screenOrientation, r.fullscreen,
+                    (r.info.flags & ActivityInfo.FLAG_SHOW_FOR_ALL_USERS) != 0, r.userId,
+                    r.info.configChanges, task.voiceSession != null, r.mLaunchTaskBehind);
+            boolean doShow = true;
+            if (newTask) {
+                if ((r.intent.getFlags() & Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED) != 0) {
+                    resetTaskIfNeededLocked(r, r);
+                    doShow = topRunningNonDelayedActivityLocked(null) == r;
+                }
+            } else if (options != null && new ActivityOptions(options).getAnimationType()
+                    == ActivityOptions.ANIM_SCENE_TRANSITION) {
+                doShow = false;
+            }
+            if (r.mLaunchTaskBehind) {
+                mWindowManager.setAppVisibility(r.appToken, true);
+                ensureActivitiesVisibleLocked(null, 0);
+            } else if (SHOW_APP_STARTING_PREVIEW && doShow) {
+                ActivityRecord prev = mResumedActivity;
+                if (prev != null) {
+                    // (1) 当前Activity所属不同的Task
+                    if (prev.task != r.task) {
+                        prev = null;
+                    }
+                    // (2) 当前Activity已经 displayed.
+                    else if (prev.nowVisible) {
+                        prev = null;
+                    }
+                }
+                mWindowManager.setAppStartingWindow(
+                        r.appToken, r.packageName, r.theme,
+                        mService.compatibilityInfoForPackageLocked(
+                                r.info.applicationInfo), r.nonLocalizedLabel,
+                        r.labelRes, r.icon, r.logo, r.windowFlags,
+                        prev != null ? prev.appToken : null, showStartingIcon);
+                r.mStartingWindowShown = true;
+            }
+        } else {
+            mWindowManager.addAppToken(task.mActivities.indexOf(r), r.appToken,
+                    r.task.taskId, mStackId, r.info.screenOrientation, r.fullscreen,
+                    (r.info.flags & ActivityInfo.FLAG_SHOW_FOR_ALL_USERS) != 0, r.userId,
+                    r.info.configChanges, task.voiceSession != null, r.mLaunchTaskBehind);
+            ActivityOptions.abort(options);
+            options = null;
+        }
+        if (VALIDATE_TOKENS) {
+            validateAppTokensLocked();
+        }
+	    // 使Activity进入显示状态
+        if (doResume) {
+            mStackSupervisor.resumeTopActivitiesLocked(this, r, options);
+        }
+    }
+```
+
+该方法主要完成：
+
+- 将ActivityRecord 放到宿主任务的栈顶位置
+- 将待启动的ActivityRecord 绑定到一个窗口，Activity的启动动画也再次设置
+- 根据onResume的值，决定是否将ActivityRecord置为显示状态
+
+#### 8、ActivityStackSupervisor & resumeTopActivitiesLocked()
+
+```java
+    boolean resumeTopActivitiesLocked(ActivityStack targetStack, ActivityRecord target,
+            Bundle targetOptions) {
+        if (targetStack == null) {
+            targetStack = mFocusedStack;
+        }
+        boolean result = false;
+        if (isFrontStack(targetStack)) {
+            // 转交ActivityStack 完成待启动Activity的显示
+            result = targetStack.resumeTopActivityLocked(target, targetOptions);
+        }
+
+        for (int displayNdx = mActivityDisplays.size() - 1; displayNdx >= 0; --displayNdx) {
+            final ArrayList<ActivityStack> stacks = mActivityDisplays.valueAt(displayNdx).mStacks;
+            for (int stackNdx = stacks.size() - 1; stackNdx >= 0; --stackNdx) {
+                final ActivityStack stack = stacks.get(stackNdx);
+                if (stack == targetStack) {
+                    // Already started above.
+                    continue;
+                }
+                // 转由其他显示设备的ActivityStack完成待启动Activity的显示
+                if (isFrontStack(stack)) {
+                    stack.resumeTopActivityLocked(null);
+                }
+            }
+        }
+        return result;
+    }
+```
+
+该函数将所有的ActivityStack栈顶的ActivityRecord迁移到显示状态
+
+#### 9、ActivityStack & resumeTopActivityLocked()
+
+```java
+    final boolean resumeTopActivityLocked(ActivityRecord prev, Bundle options) {
+        if (mStackSupervisor.inResumeTopActivity) {
+            // 防止递归启动
+            return false;
+        }
+
+        boolean result = false;
+        try {
+            // Protect against recursion.
+            mStackSupervisor.inResumeTopActivity = true;
+            if (mService.mLockScreenShown == ActivityManagerService.LOCK_SCREEN_LEAVING) {
+                mService.mLockScreenShown = ActivityManagerService.LOCK_SCREEN_HIDDEN;
+                mService.updateSleepIfNeededLocked();
+            }
+            result = resumeTopActivityInnerLocked(prev, options);
+        } finally {
+            mStackSupervisor.inResumeTopActivity = false;
+        }
+        return result;
+    }
+
+```
+
+该方法主要是防止递归调用， `inResumeTopActivity` 用于保证每次只有一个Activity执行`resumeTopActivityInnerLocked()` 操作 
+
+```java
+    private boolean resumeTopActivityInnerLocked(ActivityRecord prev, Bundle options) {
+
+        if (!mService.mBooting && !mService.mBooted) {
+            // 如果系统还未启动完毕，那么AMS还不能正常工作，所有不能显示Activity
+            return false;
+        }
+
+        ActivityRecord parent = mActivityContainer.mParentActivity;
+        if ((parent != null && parent.state != ActivityState.RESUMED) ||
+                !mActivityContainer.isAttachedLocked()) {
+            return false;
+        }
+	    // AS中可能存在有些正处于Intializing状态的ActivityRecord
+        // 如果这些AR不是位于栈顶，并且正在执行窗口启动动画，则取消这些Activity的启动动画
+        cancelInitializingActivities();
+
+        // 找到当前ActivityStack的栈顶
+        final ActivityRecord next = topRunningActivityLocked(null);
+
+        final boolean userLeaving = mStackSupervisor.mUserLeaving;
+        mStackSupervisor.mUserLeaving = false;
+
+        final TaskRecord prevTask = prev != null ? prev.task : null;
+        if (next == null) {
+            // 进入该条件，表示ActivityStack中没有要显示的Activity
+            final String reason = "noMoreActivities";
+            if (!mFullscreen) {
+                // 当该栈没有全屏，则尝试聚焦到下一个可见的Stack
+                final ActivityStack stack = getNextVisibleStackLocked();
+                if (adjustFocusToNextVisibleStackLocked(stack, reason)) {
+                    return mStackSupervisor.resumeTopActivitiesLocked(stack, prev, null);
+                }
+            }
+            // 当前AS如果没有要显示的Activity，则会要求显示桌面
+            ActivityOptions.abort(options);
+            if (DEBUG_STACK) mStackSupervisor.validateTopActivitiesLocked();
+            final int returnTaskType = prevTask == null || !prevTask.isOverHomeStack() ?
+                    HOME_ACTIVITY_TYPE : prevTask.getTaskToReturnTo();
+            // 启动home桌面Activity
+            return isOnHomeDisplay() &&
+                    mStackSupervisor.resumeHomeStackTask(returnTaskType, prev, reason);
+        }
+
+        next.delayedResume = false;
+
+        if (mResumedActivity == next && next.state == ActivityState.RESUMED &&
+                    mStackSupervisor.allResumedActivitiesComplete()) {
+            // 如果当前显示的Activity就是下一个待显示的Activity
+            // 则中断待显示ActivityRecord的调度
+            mWindowManager.executeAppTransition();
+            mNoAnimActivities.clear();
+            ActivityOptions.abort(options);
+            if (DEBUG_STACK) mStackSupervisor.validateTopActivitiesLocked();
+            return false;
+        }
+
+        final TaskRecord nextTask = next.task;
+        if (prevTask != null && prevTask.stack == this &&
+                prevTask.isOverHomeStack() && prev.finishing && prev.frontOfTask) {
+            if (DEBUG_STACK)  mStackSupervisor.validateTopActivitiesLocked();
+            if (prevTask == nextTask) {
+                prevTask.setFrontOfTask();
+            } else if (prevTask != topTask()) {
+                final int taskNdx = mTaskHistory.indexOf(prevTask) + 1;
+                mTaskHistory.get(taskNdx).setTaskToReturnTo(HOME_ACTIVITY_TYPE);
+            } else if (!isOnHomeDisplay()) {
+                return false;
+            } else if (!isHomeStack()){
+                final int returnTaskType = prevTask == null || !prevTask.isOverHomeStack() ?
+                        HOME_ACTIVITY_TYPE : prevTask.getTaskToReturnTo();
+                return isOnHomeDisplay() &&
+                        mStackSupervisor.resumeHomeStackTask(returnTaskType, prev, "prevFinished");
+            }
+        }
+
+        // 处于睡眠或关机状态,top activity已经暂停的情况下
+        if (mService.isSleepingOrShuttingDown()
+                && mLastPausedActivity == next
+                && mStackSupervisor.allPausedActivitiesComplete()) {
+            // 系统进入休眠状态，当前AS的栈顶Activity处于Pause状态
+            // 则中断待显示Activity的调度
+            mWindowManager.executeAppTransition();
+            mNoAnimActivities.clear();
+            ActivityOptions.abort(options);
+            if (DEBUG_STACK) mStackSupervisor.validateTopActivitiesLocked();
+            return false;
+        }
+
+        // 如果找不到启动Activity的User，则返回
+        if (mService.mStartedUsers.get(next.userId) == null) { 
+            if (DEBUG_STACK) mStackSupervisor.validateTopActivitiesLocked();
+            return false;
+        }
+
+        // 将待显示ActivityRecord从数组中移除
+        mStackSupervisor.mStoppingActivities.remove(next);
+        mStackSupervisor.mGoingToSleepActivities.remove(next);
+        next.sleeping = false;
+        mStackSupervisor.mWaitingVisibleActivities.remove(next);
+
+        // 如果正处于暂停Activity状态，直接返回
+        if (!mStackSupervisor.allPausedActivitiesComplete()) {
+            return false;
+        }
+        // 以上做一些启动中断的判断：比如休眠
+
+        // 设置哪个用户在启动Activity
+        mStackSupervisor.setLaunchSource(next.info.applicationInfo.uid);
+
+        // 可以在当前显示的Activity执行Pausing时，同时执行Resume操作
+        boolean dontWaitForPause = (next.info.flags&ActivityInfo.FLAG_RESUME_WHILE_PAUSING) != 0;
+        // 暂停其他Activity
+        boolean pausing = mStackSupervisor.pauseBackStacks(userLeaving, true, dontWaitForPause);
+        if (mResumedActivity != null) {
+            // 当前resume Activity不为空，则需要先暂停该Activity
+            pausing |= startPausingLocked(userLeaving, false, true, dontWaitForPause);
+        }
+        if (pausing) {
+            // 当前有正在pausing的Activity
+            if (next.app != null && next.app.thread != null) {
+                mService.updateLruProcessLocked(next.app, true, null);
+            }
+            return true;
+        }
+
+        if (mService.isSleeping() && mLastNoHistoryActivity != null &&
+                !mLastNoHistoryActivity.finishing) {
+            requestFinishActivityLocked(mLastNoHistoryActivity.appToken, Activity.RESULT_CANCELED,
+                    null, "resume-no-history", false);
+            mLastNoHistoryActivity = null;
+        }
+
+        if (prev != null && prev != next) {
+            if (!mStackSupervisor.mWaitingVisibleActivities.contains(prev)
+                    && next != null && !next.nowVisible) {
+            } else {
+                if (prev.finishing) {
+                    mWindowManager.setAppVisibility(prev.appToken, false);
+                }
+            }
+        }
+
+        try {
+            AppGlobals.getPackageManager().setPackageStoppedState(
+                    next.packageName, false, next.userId); /* TODO: Verify if correct userid */
+        } catch (RemoteException e1) {
+        } catch (IllegalArgumentException e) {
+        }
+
+        boolean anim = true;
+        if (prev != null) {
+            if (prev.finishing) {
+                if (mNoAnimActivities.contains(prev)) {
+                    anim = false;
+                    mWindowManager.prepareAppTransition(AppTransition.TRANSIT_NONE, false);
+                } else {
+                    mWindowManager.prepareAppTransition(prev.task == next.task
+                            ? AppTransition.TRANSIT_ACTIVITY_CLOSE
+                            : AppTransition.TRANSIT_TASK_CLOSE, false);
+                }
+                mWindowManager.setAppWillBeHidden(prev.appToken);
+                mWindowManager.setAppVisibility(prev.appToken, false);
+            } else {
+                if (mNoAnimActivities.contains(next)) {
+                    anim = false;
+                    mWindowManager.prepareAppTransition(AppTransition.TRANSIT_NONE, false);
+                } else {
+                    mWindowManager.prepareAppTransition(prev.task == next.task
+                            ? AppTransition.TRANSIT_ACTIVITY_OPEN
+                            : next.mLaunchTaskBehind
+                                    ? AppTransition.TRANSIT_TASK_OPEN_BEHIND
+                                    : AppTransition.TRANSIT_TASK_OPEN, false);
+                }
+            }
+            if (false) {
+                mWindowManager.setAppWillBeHidden(prev.appToken);
+                mWindowManager.setAppVisibility(prev.appToken, false);
+            }
+        } else {
+            if (mNoAnimActivities.contains(next)) {
+                anim = false;
+                mWindowManager.prepareAppTransition(AppTransition.TRANSIT_NONE, false);
+            } else {
+                mWindowManager.prepareAppTransition(AppTransition.TRANSIT_ACTIVITY_OPEN, false);
+            }
+        }
+
+        Bundle resumeAnimOptions = null;
+        if (anim) {
+            ActivityOptions opts = next.getOptionsForTargetActivityLocked();
+            if (opts != null) {
+                resumeAnimOptions = opts.toBundle();
+            }
+            next.applyOptionsLocked();
+        } else {
+            next.clearOptionsLocked();
+        }
+
+        ActivityStack lastStack = mStackSupervisor.getLastStack();
+        if (next.app != null && next.app.thread != null) {
+            // 进入此条件表示待启动Activity的宿主进程已经存在
+            mWindowManager.setAppVisibility(next.appToken, true);
+
+            next.startLaunchTickingLocked();
+
+            ActivityRecord lastResumedActivity =
+                    lastStack == null ? null :lastStack.mResumedActivity;
+            ActivityState lastState = next.state;
+
+            mService.updateCpuStats();
+		
+            // 设置待显示Activity状态设置为RESUMED
+            next.state = ActivityState.RESUMED;
+            mResumedActivity = next;
+            next.task.touchActiveTime();
+            mRecentTasks.addLocked(next.task);
+            mService.updateLruProcessLocked(next.app, true, null);
+            updateLRUListLocked(next);
+            mService.updateOomAdjLocked();
+
+            boolean notUpdated = true;
+            if (mStackSupervisor.isFrontStack(this)) {
+                Configuration config = mWindowManager.updateOrientationFromAppTokens(
+                        mService.mConfiguration,
+                        next.mayFreezeScreenLocked(next.app) ? next.appToken : null);
+                if (config != null) {
+                    next.frozenBeforeDestroy = true;
+                }
+                notUpdated = !mService.updateConfigurationLocked(config, next, false, false);
+            }
+
+            if (notUpdated) {
+                ActivityRecord nextNext = topRunningActivityLocked(null);   
+                if (nextNext != next) {
+                    mStackSupervisor.scheduleResumeTopActivities();
+                }
+                if (mStackSupervisor.reportResumedActivityLocked(next)) {
+                    mNoAnimActivities.clear();
+                    return true;
+                }
+                return false;
+            }
+
+            try { 
+                ArrayList<ResultInfo> a = next.results;
+                if (a != null) {
+                    final int N = a.size();
+                    if (!next.finishing && N > 0) {
+                        next.app.thread.scheduleSendResult(next.appToken, a);
+                    }
+                }
+
+                if (next.newIntents != null) {
+                    next.app.thread.scheduleNewIntent(next.newIntents, next.appToken);
+                }
+                
+                next.sleeping = false;
+                mService.showAskCompatModeDialogLocked(next);
+                next.app.pendingUiClean = true;
+                next.app.forceProcessStateUpTo(mService.mTopProcessState);
+                next.clearOptionsLocked();
+                // 触发onResume()
+                next.app.thread.scheduleResumeActivity(next.appToken, next.app.repProcState,
+                        mService.isNextTransitionForward(), resumeAnimOptions);
+
+                mStackSupervisor.checkReadyForSleepLocked();
+
+            } catch (Exception e) {
+                ...
+                return true;
+            }
+
+            try {
+                next.visible = true;
+                completeResumeLocked(next);
+            } catch (Exception e) {
+                ...
+            }
+            next.stopped = false;
+
+        } else {
+            if (!next.hasBeenLaunched) {
+                next.hasBeenLaunched = true;
+            } else {
+                if (SHOW_APP_STARTING_PREVIEW) {
+                    mWindowManager.setAppStartingWindow(
+                            next.appToken, next.packageName, next.theme,
+                            mService.compatibilityInfoForPackageLocked(
+                                    next.info.applicationInfo),
+                            next.nonLocalizedLabel,
+                            next.labelRes, next.icon, next.logo, next.windowFlags,
+                            null, true);
+                }
+            }
+            mStackSupervisor.startSpecificActivityLocked(next, true, true);
+        }
+        return true;
+    }
+
+```
+
+该方法将当前正在显示的Activity迁移到Pausing状态，然后将待显示的Activity迁移到Resumed状态。然后进入
+
+`startSpecificActivityLocked()` 方法
+
+```java
+    void startSpecificActivityLocked(ActivityRecord r,
+            boolean andResume, boolean checkConfig) {
+        // 获得当前进程
+        ProcessRecord app = mService.getProcessRecordLocked(r.processName,
+                r.info.applicationInfo.uid, true);
+
+        r.task.stack.setLaunchTime(r);
+		
+        // 当前进程是否为空
+        if (app != null && app.thread != null) {
+            try {
+                if ((r.info.flags&ActivityInfo.FLAG_MULTIPROCESS) == 0
+                        || !"android".equals(r.info.packageName)) {
+                    app.addPackage(r.info.packageName, r.info.applicationInfo.versionCode,
+                            mService.mProcessStats);
+                }
+                // 真正启动Activity的地方
+                realStartActivityLocked(r, app, andResume, checkConfig);
+                return;
+            } catch (RemoteException e) {
+                Slog.w(TAG, "Exception when starting activity "
+                        + r.intent.getComponent().flattenToShortString(), e);
+            }
+        }
+	   // 如果进程不存在，创建进程
+        mService.startProcessLocked(r.processName, r.info.applicationInfo, true, 0,
+                "activity", r.intent.getComponent(), false, false, true);
+    }
+
+```
+
+该方法主要判断目标Activity所在进程是否启动，如果启动则执行`realStartActivityLocked`真正启动Activity，如果进程不存在则创建进程。
+
+#### 10、ActivityManagerService & startProcessLocked
+
+```java
+    final ProcessRecord startProcessLocked(String processName, ApplicationInfo info,
+            boolean knownToBeDead, int intentFlags, String hostingType, ComponentName hostingName,
+            boolean allowWhileBooting, boolean isolated, int isolatedUid, boolean keepIfLarge,
+            String abiOverride, String entryPoint, String[] entryPointArgs, Runnable crashHandler) {
+        long startTime = SystemClock.elapsedRealtime();
+        ProcessRecord app;
+        if (!isolated) {
+            app = getProcessRecordLocked(processName, info.uid, keepIfLarge);
+		   // FLAG_FROM_BACKGROUND 表示后台启动进程
+            if ((intentFlags & Intent.FLAG_FROM_BACKGROUND) != 0) {
+                if (mBadProcesses.get(info.processName, info.uid) != null) {
+                    // 后台启动一个mBadProcesses，直接退出
+                    return null;
+                }
+            } else {
+                // 前台启动，需要将宿主进程从坏的进程中剔除
+                mProcessCrashTimes.remove(info.processName, info.uid);
+                if (mBadProcesses.get(info.processName, info.uid) != null) {
+                    EventLog.writeEvent(EventLogTags.AM_PROC_GOOD,
+                            UserHandle.getUserId(info.uid), info.uid,
+                            info.processName);
+                    mBadProcesses.remove(info.processName, info.uid);
+                    if (app != null) {
+                        app.bad = false;
+                    }
+                }
+            }
+        } else {
+            app = null;
+        }
+
+        // 当进程已经分配PID时
+        if (app != null && app.pid > 0) {
+            if (!knownToBeDead || app.thread == null) {
+                // 进程还处于启动过程中
+                app.addPackage(info.packageName, info.versionCode, mProcessStats);
+                checkTime(startTime, "startProcess: done, added package to proc");
+                return app;
+            }
+
+            checkTime(startTime, "startProcess: bad proc running, killing");
+            // 进程已经挂掉
+            killProcessGroup(app.info.uid, app.pid);
+            handleAppDiedLocked(app, true, true);
+            checkTime(startTime, "startProcess: done killing old proc");
+        }
+
+        String hostingNameStr = hostingName != null
+                ? hostingName.flattenToShortString() : null;
+
+        if (app == null) {
+            checkTime(startTime, "startProcess: creating new process record");
+            // 创建一个新的进程
+            app = newProcessRecordLocked(info, processName, isolated, isolatedUid);
+            if (app == null) {
+                Slog.w(TAG, "Failed making new process record for "
+                        + processName + "/" + info.uid + " isolated=" + isolated);
+                return null;
+            }
+            app.crashHandler = crashHandler;
+            checkTime(startTime, "startProcess: done creating new process record");
+        } else {
+            app.addPackage(info.packageName, info.versionCode, mProcessStats);
+            checkTime(startTime, "startProcess: added package to existing proc");
+        }
+		// 如果系统还未启动，则需要将待启动进程先保持朱，等系统进程启动后，在启动这些进程
+        if (!mProcessesReady
+                && !isAllowedWhileBooting(info)
+                && !allowWhileBooting) {
+            if (!mProcessesOnHold.contains(app)) {
+                mProcessesOnHold.add(app);
+            }
+            checkTime(startTime, "startProcess: returning with proc on hold");
+            return app;
+        }
+
+        checkTime(startTime, "startProcess: stepping in to startProcess");
+        // 启动进程
+        startProcessLocked(
+                app, hostingType, hostingNameStr, abiOverride, entryPoint, entryPointArgs);
+        checkTime(startTime, "startProcess: done starting proc!");
+        return (app.pid != 0) ? app : null;
+    }
+
+```
+
+该方法主要对后台进程处理和坏进程处理，然后调用`startProcessLocked()` 继续启动进程
+
+```java
+private final void startProcessLocked(ProcessRecord app, String hostingType,
+        String hostingNameStr, String abiOverride, String entryPoint, String[] entryPointArgs) {
+    long startTime = SystemClock.elapsedRealtime();
+    if (app.pid > 0 && app.pid != MY_PID) {
+        checkTime(startTime, "startProcess: removing from pids map");
+        synchronized (mPidsSelfLocked) {
+            mPidsSelfLocked.remove(app.pid);
+            mHandler.removeMessages(PROC_START_TIMEOUT_MSG, app);
+        }
+        checkTime(startTime, "startProcess: done removing from pids map");
+        app.setPid(0);
+    }
+
+    mProcessesOnHold.remove(app);
+
+    checkTime(startTime, "startProcess: starting to update cpu stats");
+    updateCpuStats();
+    checkTime(startTime, "startProcess: done updating cpu stats");
+
+    try {
+        try {
+            if (AppGlobals.getPackageManager().isPackageFrozen(app.info.packageName)) {
+                // This is caught below as if we had failed to fork zygote
+                throw new RuntimeException("Package " + app.info.packageName + " is frozen!");
+            }
+        } catch (RemoteException e) {
+            throw e.rethrowAsRuntimeException();
+        }
+
+        int uid = app.uid;
+        int[] gids = null;
+        int mountExternal = Zygote.MOUNT_EXTERNAL_NONE;
+        if (!app.isolated) {
+            int[] permGids = null;
+            try {
+                checkTime(startTime, "startProcess: getting gids from package manager");
+                final IPackageManager pm = AppGlobals.getPackageManager();
+                permGids = pm.getPackageGids(app.info.packageName, app.userId);
+                MountServiceInternal mountServiceInternal = LocalServices.getService(
+                        MountServiceInternal.class);
+                mountExternal = mountServiceInternal.getExternalStorageMountMode(uid,
+                        app.info.packageName);
+            } catch (RemoteException e) {
+                throw e.rethrowAsRuntimeException();
+            }
+
+            /*
+             * Add shared application and profile GIDs so applications can share some
+             * resources like shared libraries and access user-wide resources
+             */
+            if (ArrayUtils.isEmpty(permGids)) {
+                gids = new int[2];
+            } else {
+                gids = new int[permGids.length + 2];
+                System.arraycopy(permGids, 0, gids, 2, permGids.length);
+            }
+            gids[0] = UserHandle.getSharedAppGid(UserHandle.getAppId(uid));
+            gids[1] = UserHandle.getUserGid(UserHandle.getUserId(uid));
+        }
+        checkTime(startTime, "startProcess: building args");
+        if (mFactoryTest != FactoryTest.FACTORY_TEST_OFF) {
+            if (mFactoryTest == FactoryTest.FACTORY_TEST_LOW_LEVEL
+                    && mTopComponent != null
+                    && app.processName.equals(mTopComponent.getPackageName())) {
+                uid = 0;
+            }
+            if (mFactoryTest == FactoryTest.FACTORY_TEST_HIGH_LEVEL
+                    && (app.info.flags&ApplicationInfo.FLAG_FACTORY_TEST) != 0) {
+                uid = 0;
+            }
+        }
+        int debugFlags = 0;
+        if ((app.info.flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+            debugFlags |= Zygote.DEBUG_ENABLE_DEBUGGER;
+            // Also turn on CheckJNI for debuggable apps. It's quite
+            // awkward to turn on otherwise.
+            debugFlags |= Zygote.DEBUG_ENABLE_CHECKJNI;
+        }
+        // Run the app in safe mode if its manifest requests so or the
+        // system is booted in safe mode.
+        if ((app.info.flags & ApplicationInfo.FLAG_VM_SAFE_MODE) != 0 ||
+            mSafeMode == true) {
+            debugFlags |= Zygote.DEBUG_ENABLE_SAFEMODE;
+        }
+        if ("1".equals(SystemProperties.get("debug.checkjni"))) {
+            debugFlags |= Zygote.DEBUG_ENABLE_CHECKJNI;
+        }
+        String jitDebugProperty = SystemProperties.get("debug.usejit");
+        if ("true".equals(jitDebugProperty)) {
+            debugFlags |= Zygote.DEBUG_ENABLE_JIT;
+        } else if (!"false".equals(jitDebugProperty)) {
+            // If we didn't force disable by setting false, defer to the dalvik vm options.
+            if ("true".equals(SystemProperties.get("dalvik.vm.usejit"))) {
+                debugFlags |= Zygote.DEBUG_ENABLE_JIT;
+            }
+        }
+        String genDebugInfoProperty = SystemProperties.get("debug.generate-debug-info");
+        if ("true".equals(genDebugInfoProperty)) {
+            debugFlags |= Zygote.DEBUG_GENERATE_DEBUG_INFO;
+        }
+        if ("1".equals(SystemProperties.get("debug.jni.logging"))) {
+            debugFlags |= Zygote.DEBUG_ENABLE_JNI_LOGGING;
+        }
+        if ("1".equals(SystemProperties.get("debug.assert"))) {
+            debugFlags |= Zygote.DEBUG_ENABLE_ASSERT;
+        }
+
+        String requiredAbi = (abiOverride != null) ? abiOverride : app.info.primaryCpuAbi;
+        if (requiredAbi == null) {
+            requiredAbi = Build.SUPPORTED_ABIS[0];
+        }
+
+        String instructionSet = null;
+        if (app.info.primaryCpuAbi != null) {
+            instructionSet = VMRuntime.getInstructionSet(app.info.primaryCpuAbi);
+        }
+
+        app.gids = gids;
+        app.requiredAbi = requiredAbi;
+        app.instructionSet = instructionSet;
+
+        // Start the process.  It will either succeed and return a result containing
+        // the PID of the new process, or else throw a RuntimeException.
+        boolean isActivityProcess = (entryPoint == null);
+        if (entryPoint == null) entryPoint = "android.app.ActivityThread";
+        Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER, "Start proc: " +
+                app.processName);
+        checkTime(startTime, "startProcess: asking zygote to start proc");
+        Process.ProcessStartResult startResult = Process.start(entryPoint,
+                app.processName, uid, uid, gids, debugFlags, mountExternal,
+                app.info.targetSdkVersion, app.info.seinfo, requiredAbi, instructionSet,
+                app.info.dataDir, entryPointArgs);
+        ...
+    } catch (RuntimeException e) {
+        ...
+    }
+}
+```
+
+ 该方法对进程启动参数进行整理设置，值得注意的是`entryPoint = "android.app.ActivityThread"` ，后面反射就是根据entryPoint 的值来进行的。然后执行`Process.start()`方法
+
+#### 11、Process & start()
+
+```java
+    public static final ProcessStartResult start(final String processClass,
+                                  final String niceName,
+                                  int uid, int gid, int[] gids,
+                                  int debugFlags, int mountExternal,
+                                  int targetSdkVersion,
+                                  String seInfo,
+                                  String abi,
+                                  String instructionSet,
+                                  String appDataDir,
+                                  String[] zygoteArgs) {
+        try {
+            return startViaZygote(processClass, niceName, uid, gid, gids,
+                    debugFlags, mountExternal, targetSdkVersion, seInfo,
+                    abi, instructionSet, appDataDir, zygoteArgs);
+        } catch (ZygoteStartFailedEx ex) {
+            ...
+        }
+    }
+```
+
+继续执行`startViaZygote()` 方法，值得注意的是`processClass` 就是上面的 `entryPoint ` 的值`android.app.ActivityThread`
+
+```java
+    private static ProcessStartResult startViaZygote(final String processClass,
+                                  final String niceName,
+                                  final int uid, final int gid,
+                                  final int[] gids,
+                                  int debugFlags, int mountExternal,
+                                  int targetSdkVersion,
+                                  String seInfo,
+                                  String abi,
+                                  String instructionSet,
+                                  String appDataDir,
+                                  String[] extraArgs)
+                                  throws ZygoteStartFailedEx {
+        synchronized(Process.class) {
+            ArrayList<String> argsForZygote = new ArrayList<String>();
+
+			...
+
+            return zygoteSendArgsAndGetResult(openZygoteSocketIfNeeded(abi), argsForZygote);
+        }
+    }
+
+```
+
+该方法主要配置创建进程所需要的参数。
+
+然后调用`zygoteSendArgsAndGetResult`方法，通过Socket方式，向Zygote进程发送创建进程的通知。
+
+Zygote进程收到AMS的创建进程的请求，通过fork自身创建新的进程，并通过反射包名`android.app.ActivityThread`执行`ActivityThread`的 `main()`方法
+
+### 二、真正启动
+
+#### 1、ActivityThread & main()
+
+```java
+    public static void main(String[] args) {
+		...
+        Process.setArgV0("<pre-initialized>");
+
+        Looper.prepareMainLooper();
+
+        ActivityThread thread = new ActivityThread();
+        thread.attach(false);
+
+        if (sMainThreadHandler == null) {
+            sMainThreadHandler = thread.getHandler();
+        }
+        
+        Looper.loop();
+
+        throw new RuntimeException("Main thread loop unexpectedly exited");
+    }
+```
+
+创建`ActivityThread` 对象，执行`attach(false)`方法
+
+```java
+    private void attach(boolean system) {
+        sCurrentActivityThread = this;
+        mSystemThread = system;
+        if (!system) {
+            ViewRootImpl.addFirstDrawHandler(new Runnable() {
+                @Override
+                public void run() {
+                    ensureJitEnabled();
+                }
+            });
+            // 设置进程名
+            android.ddm.DdmHandleAppName.setAppName("<pre-initialized>",
+                                                    UserHandle.myUserId());
+            RuntimeInit.setApplicationObject(mAppThread.asBinder());
+            final IActivityManager mgr = ActivityManagerNative.getDefault();
+            try {
+                mgr.attachApplication(mAppThread);
+            } catch (RemoteException ex) {
+                // Ignore
+            }
+            ...
+        } else {
+            ...
+        }
+
+		...
+    }
+
+```
+
+该函数完成一些初始化操作，然后通过`IActivityManager` 发起跨进程调用`attachApplication(mAppThread)`
+
+#### 2、AMS & attachApplication()
+
+```java
+@Override
+public final void attachApplication(IApplicationThread thread) {
+    synchronized (this) {
+        int callingPid = Binder.getCallingPid();
+        final long origId = Binder.clearCallingIdentity();
+        attachApplicationLocked(thread, callingPid);
+        Binder.restoreCallingIdentity(origId);
+    }
+}
+```
+
+继续执行`attachApplicationLocked()`
+
+```java
+    private final boolean attachApplicationLocked(IApplicationThread thread,
+            int pid) {
+
+        ProcessRecord app;
+        // 根据PID映射应用进程的ProcessRecord对象
+        if (pid != MY_PID && pid >= 0) {
+            synchronized (mPidsSelfLocked) {
+                app = mPidsSelfLocked.get(pid);
+            }
+        } else {
+            app = null;
+        }
+
+        if (app == null) {
+          	// 获取ProcessRecord失败，退出
+            if (pid > 0 && pid != MY_PID) {
+                Process.killProcessQuiet(pid);
+            } else {
+                try {
+                    thread.scheduleExit();
+                } catch (Exception e) {
+                }
+            }
+            return false;
+        }
+
+        if (app.thread != null) {
+            // 清楚ProcessRecord绑定的信息
+            handleAppDiedLocked(app, true, true);
+        }
+
+        final String processName = app.processName;
+        try {
+            // 注册应用进程的AppDeathRecipient， 当应用进程崩溃时，系统可以收到通知
+            AppDeathRecipient adr = new AppDeathRecipient(
+                    app, pid, thread);
+            thread.asBinder().linkToDeath(adr, 0);
+            app.deathRecipient = adr;
+        } catch (RemoteException e) {
+            app.resetPackageList(mProcessStats);
+            startProcessLocked(app, "link fail", processName);
+            return false;
+        }
+
+        // 将ProcessRecord对象绑定到应用进程，这时ProcessRecord就变成了“激活”状态
+        app.makeActive(thread, mProcessStats);
+        app.curAdj = app.setAdj = -100;
+        app.curSchedGroup = app.setSchedGroup = Process.THREAD_GROUP_DEFAULT;
+        app.forcingToForeground = null;
+        updateProcessForegroundLocked(app, false, false);
+        app.hasShownUi = false;
+        app.debugging = false;
+        app.cached = false;
+        app.killedByAm = false;
+
+        mHandler.removeMessages(PROC_START_TIMEOUT_MSG, app);
+
+        boolean normalMode = mProcessesReady || isAllowedWhileBooting(app.info);
+        // 获取应用进程的所有Provider
+        List<ProviderInfo> providers = normalMode ? generateApplicationProvidersLocked(app) : null;
+
+        try {
+            int testMode = IApplicationThread.DEBUG_OFF;
+            if (mDebugApp != null && mDebugApp.equals(processName)) {
+                testMode = mWaitForDebugger
+                    ? IApplicationThread.DEBUG_WAIT
+                    : IApplicationThread.DEBUG_ON;
+                app.debugging = true;
+                if (mDebugTransient) {
+                    mDebugApp = mOrigDebugApp;
+                    mWaitForDebugger = mOrigWaitForDebugger;
+                }
+            }
+            String profileFile = app.instrumentationProfileFile;
+            ParcelFileDescriptor profileFd = null;
+            int samplingInterval = 0;
+            boolean profileAutoStop = false;
+            if (mProfileApp != null && mProfileApp.equals(processName)) {
+                mProfileProc = app;
+                profileFile = mProfileFile;
+                profileFd = mProfileFd;
+                samplingInterval = mSamplingInterval;
+                profileAutoStop = mAutoStopProfiler;
+            }
+            boolean enableOpenGlTrace = false;
+            if (mOpenGlTraceApp != null && mOpenGlTraceApp.equals(processName)) {
+                enableOpenGlTrace = true;
+                mOpenGlTraceApp = null;
+            }
+
+            // If the app is being launched for restore or full backup, set it up specially
+            boolean isRestrictedBackupMode = false;
+            if (mBackupTarget != null && mBackupAppName.equals(processName)) {
+                isRestrictedBackupMode = (mBackupTarget.backupMode == BackupRecord.RESTORE)
+                        || (mBackupTarget.backupMode == BackupRecord.RESTORE_FULL)
+                        || (mBackupTarget.backupMode == BackupRecord.BACKUP_FULL);
+            }
+
+            ensurePackageDexOpt(app.instrumentationInfo != null
+                    ? app.instrumentationInfo.packageName
+                    : app.info.packageName);
+            if (app.instrumentationClass != null) {
+                ensurePackageDexOpt(app.instrumentationClass.getPackageName());
+            }
+            if (DEBUG_CONFIGURATION) Slog.v(TAG_CONFIGURATION, "Binding proc "
+                    + processName + " with config " + mConfiguration);
+            ApplicationInfo appInfo = app.instrumentationInfo != null
+                    ? app.instrumentationInfo : app.info;
+            app.compat = compatibilityInfoForPackageLocked(appInfo);
+            if (profileFd != null) {
+                profileFd = profileFd.dup();
+            }
+            ProfilerInfo profilerInfo = profileFile == null ? null
+                    : new ProfilerInfo(profileFile, profileFd, samplingInterval, profileAutoStop);
+            
+            // 发起跨进程调用
+            thread.bindApplication(processName, appInfo, providers, app.instrumentationClass,
+                    profilerInfo, app.instrumentationArguments, app.instrumentationWatcher,
+                    app.instrumentationUiAutomationConnection, testMode, enableOpenGlTrace,
+                    isRestrictedBackupMode || !normalMode, app.persistent,
+                    new Configuration(mConfiguration), app.compat,
+                    getCommonServicesLocked(app.isolated),
+                    mCoreSettingsObserver.getCoreSettingsLocked());
+            updateLruProcessLocked(app, false, null);
+            app.lastRequestedGc = app.lastLowMemory = SystemClock.uptimeMillis();
+        } catch (Exception e) {
+            app.resetPackageList(mProcessStats);
+            app.unlinkDeathRecipient();
+            startProcessLocked(app, "bind fail", processName);
+            return false;
+        }
+
+        mPersistentStartingProcesses.remove(app);
+        mProcessesOnHold.remove(app);
+
+        boolean badApp = false;
+        boolean didSomething = false;
+
+        if (normalMode) {
+            try {
+                // 调度Activity
+                if (mStackSupervisor.attachApplicationLocked(app)) {
+                    didSomething = true;
+                }
+            } catch (Exception e) {
+                badApp = true;
+            }
+        }
+
+        if (!badApp) {
+            try {
+                // 调度Service
+                didSomething |= mServices.attachApplicationLocked(app, processName);
+            } catch (Exception e) {
+                badApp = true;
+            }
+        }
+
+        if (!badApp && isPendingBroadcastProcessLocked(pid)) {
+            try {
+                // 调度Broadcast
+                didSomething |= sendPendingBroadcastsLocked(app);
+            } catch (Exception e) {
+                badApp = true;
+            }
+        }
+
+        // Check whether the next backup agent is in this process...
+        if (!badApp && mBackupTarget != null && mBackupTarget.appInfo.uid == app.uid) {
+            if (DEBUG_BACKUP) Slog.v(TAG_BACKUP,
+                    "New app is backup target, launching agent for " + app);
+            ensurePackageDexOpt(mBackupTarget.appInfo.packageName);
+            try {
+                thread.scheduleCreateBackupAgent(mBackupTarget.appInfo,
+                        compatibilityInfoForPackageLocked(mBackupTarget.appInfo),
+                        mBackupTarget.backupMode);
+            } catch (Exception e) {
+                Slog.wtf(TAG, "Exception thrown creating backup agent in " + app, e);
+                badApp = true;
+            }
+        }
+
+        if (badApp) {
+            app.kill("error during init", true);
+            handleAppDiedLocked(app, false, true);
+            return false;
+        }
+
+        if (!didSomething) {
+            updateOomAdjLocked();
+        }
+
+        return true;
+    }
+```
+
+该方法主要逻辑：
+
+- 获取`ProcessRecord`对象，并对ProcessRecord为空和不为空进行处理
+- 为应用进程注册`AppDeathRecipient`，它是存在于系统进程的对象，当应用进程被杀掉的时候，系统会收到通知
+- 激活`ProcessRecord`，将`ApplicationThread`对象赋值给`ProcessRecord.thread`变量
+- 获取应用进程中所注册的Provider
+- 通过`IApplicationThread.bindApplication()` 发起跨进程调用，将进程名、ApplicationInfo等信息传递给进程
+- 依次调度`Activity`、`Service`和`Broadcast`。再次主要分析`mStackSupervisor.attachApplicationLocked(app)`
+
+#### 3、 ActivityThread & bindApplication()
+
+```java
+        public final void bindApplication(String processName, ApplicationInfo appInfo,
+                List<ProviderInfo> providers, ComponentName instrumentationName,
+                ProfilerInfo profilerInfo, Bundle instrumentationArgs,
+                IInstrumentationWatcher instrumentationWatcher,
+                IUiAutomationConnection instrumentationUiConnection, int debugMode,
+                boolean enableOpenGlTrace, boolean isRestrictedBackupMode, boolean persistent,
+                Configuration config, CompatibilityInfo compatInfo, Map<String, IBinder> services,
+                Bundle coreSettings) {
+
+            if (services != null) {
+                // Setup the service cache in the ServiceManager
+                ServiceManager.initServiceCache(services);
+            }
+
+            setCoreSettings(coreSettings);
+
+
+            IPackageManager pm = getPackageManager();
+            PackageInfo pi = null;
+            try {
+                pi = pm.getPackageInfo(appInfo.packageName, 0, UserHandle.myUserId());
+            } catch (RemoteException e) {
+            }
+            if (pi != null) {
+                boolean sharedUserIdSet = (pi.sharedUserId != null);
+                boolean processNameNotDefault =
+                (pi.applicationInfo != null &&
+                 !appInfo.packageName.equals(pi.applicationInfo.processName));
+                boolean sharable = (sharedUserIdSet || processNameNotDefault);
+
+                // Tell the VMRuntime about the application, unless it is shared
+                // inside a process.
+                if (!sharable) {
+                    VMRuntime.registerAppInfo(appInfo.packageName, appInfo.dataDir,
+                                            appInfo.processName);
+                }
+            }
+
+            AppBindData data = new AppBindData();
+            data.processName = processName;
+            data.appInfo = appInfo;
+            data.providers = providers;
+            data.instrumentationName = instrumentationName;
+            data.instrumentationArgs = instrumentationArgs;
+            data.instrumentationWatcher = instrumentationWatcher;
+            data.instrumentationUiAutomationConnection = instrumentationUiConnection;
+            data.debugMode = debugMode;
+            data.enableOpenGlTrace = enableOpenGlTrace;
+            data.restrictedBackupMode = isRestrictedBackupMode;
+            data.persistent = persistent;
+            data.config = config;
+            data.compatInfo = compatInfo;
+            data.initProfilerInfo = profilerInfo;
+            sendMessage(H.BIND_APPLICATION, data);
+        }
+
+```
+
+此方法通过Handler切换到主线程继续执行`handleBindApplication(data)`
+
+#### 4、Application 创建
+
+```java
+    private void handleBindApplication(AppBindData data) {
+        ...
+
+        // 设置进程名
+        Process.setArgV0(data.processName);
+        android.ddm.DdmHandleAppName.setAppName(data.processName,
+                                                UserHandle.myUserId());
+       	...
+        // 创建环境变量Contenxt：ContextImpl
+        final ContextImpl appContext = ContextImpl.createAppContext(this, data.info);
+        ...
+	    // 初始化InstrumentationInfo对象
+        if (data.instrumentationName != null) {
+            InstrumentationInfo ii = null;
+            try {
+                ii = appContext.getPackageManager().
+                    getInstrumentationInfo(data.instrumentationName, 0);
+            } catch (NameNotFoundException e) {
+            }
+            if (ii == null) {
+                throw new RuntimeException(
+                    "Unable to find instrumentation info for: "
+                    + data.instrumentationName);
+            }
+
+            mInstrumentationPackageName = ii.packageName;
+            mInstrumentationAppDir = ii.sourceDir;
+            mInstrumentationSplitAppDirs = ii.splitSourceDirs;
+            mInstrumentationLibDir = ii.nativeLibraryDir;
+            mInstrumentedAppDir = data.info.getAppDir();
+            mInstrumentedSplitAppDirs = data.info.getSplitAppDirs();
+            mInstrumentedLibDir = data.info.getLibDir();
+
+            ApplicationInfo instrApp = new ApplicationInfo();
+            instrApp.packageName = ii.packageName;
+            instrApp.sourceDir = ii.sourceDir;
+            instrApp.publicSourceDir = ii.publicSourceDir;
+            instrApp.splitSourceDirs = ii.splitSourceDirs;
+            instrApp.splitPublicSourceDirs = ii.splitPublicSourceDirs;
+            instrApp.dataDir = ii.dataDir;
+            instrApp.nativeLibraryDir = ii.nativeLibraryDir;
+            LoadedApk pi = getPackageInfo(instrApp, data.compatInfo,
+                    appContext.getClassLoader(), false, true, false);
+            ContextImpl instrContext = ContextImpl.createAppContext(this, pi);
+
+            try {
+                ClassLoader cl = instrContext.getClassLoader();
+                mInstrumentation = (Instrumentation)
+                    cl.loadClass(data.instrumentationName.getClassName()).newInstance();
+            } catch (Exception e) {
+                throw new RuntimeException(
+                    "Unable to instantiate instrumentation "
+                    + data.instrumentationName + ": " + e.toString(), e);
+            }
+
+            mInstrumentation.init(this, instrContext, appContext,
+                   new ComponentName(ii.packageName, ii.name), data.instrumentationWatcher,
+                   data.instrumentationUiAutomationConnection);
+
+            if (mProfiler.profileFile != null && !ii.handleProfiling
+                    && mProfiler.profileFd == null) {
+                mProfiler.handlingProfiling = true;
+                File file = new File(mProfiler.profileFile);
+                file.getParentFile().mkdirs();
+                Debug.startMethodTracing(file.toString(), 8 * 1024 * 1024);
+            }
+
+        } else {
+            mInstrumentation = new Instrumentation();
+        }
+
+        try {
+            // 创建Application对象
+            Application app = data.info.makeApplication(data.restrictedBackupMode, null);
+            mInitialApplication = app;
+
+            if (!data.restrictedBackupMode) {
+                //装载Providers
+                List<ProviderInfo> providers = data.providers;
+                if (providers != null) {
+                    installContentProviders(app, providers);
+                    mH.sendEmptyMessageDelayed(H.ENABLE_JIT, 10*1000);
+                }
+            }
+
+            try {
+                mInstrumentation.onCreate(data.instrumentationArgs);
+            }
+            catch (Exception e) {
+                ...
+            }
+
+            try {
+                // 执行Application的onCreate()方法
+                mInstrumentation.callApplicationOnCreate(app);
+            } catch (Exception e) {
+                if (!mInstrumentation.onException(app, e)) {
+                    throw new RuntimeException(
+                        "Unable to create application " + app.getClass().getName()
+                        + ": " + e.toString(), e);
+                }
+            }
+        } finally {
+            StrictMode.setThreadPolicy(savedPolicy);
+        }
+    }
+```
+
+该方法主要：
+
+- 创建Android运行环境`Context`对象。通过`ContextImpl.createAppContext()`方法创建
+- 创建`InstrumentationInfo`对象
+- 创建`Application`对象。通过**LoadedApk.makeApplication()**函数，就能创建一个Application对象；
+- 装载`Providers`。并且在`Application.onCrate()`方法之前创建 **ContentProvider** 对象
+- 调用 `Application.onCrate()` 方法
+
+#### 5、ActivityStackSupervisor& attachApplicationLocked()
+
+```java
+    boolean attachApplicationLocked(ProcessRecord app) throws RemoteException {
+        final String processName = app.processName;
+        boolean didSomething = false;
+        for (int displayNdx = mActivityDisplays.size() - 1; displayNdx >= 0; --displayNdx) {
+            ArrayList<ActivityStack> stacks = mActivityDisplays.valueAt(displayNdx).mStacks;
+            for (int stackNdx = stacks.size() - 1; stackNdx >= 0; --stackNdx) {
+                final ActivityStack stack = stacks.get(stackNdx);
+                if (!isFrontStack(stack)) {
+                    continue;
+                }
+                ActivityRecord hr = stack.topRunningActivityLocked(null);
+                if (hr != null) {
+                    if (hr.app == null && app.uid == hr.info.applicationInfo.uid
+                            && processName.equals(hr.processName)) {
+                        try {
+                            if (realStartActivityLocked(hr, app, true, true)) {
+                                didSomething = true;
+                            }
+                        } catch (RemoteException e) {
+                            Slog.w(TAG, "Exception in new application when starting activity "
+                                  + hr.intent.getComponent().flattenToShortString(), e);
+                            throw e;
+                        }
+                    }
+                }
+            }
+        }
+        if (!didSomething) {
+            ensureActivitiesVisibleLocked(null, 0);
+        }
+        return didSomething;
+    }
+
+```
+
+该方法会遍历`ActivityStack` 和 `TaskRecord`，对栈顶的 `ActivityRecord` 进行操作。然后调用`realStartActivityLocked` 启动Activity
+
+#### 6、ActivityStackSupervisor & realStartActivityLocked()
+
+```java
+    final boolean realStartActivityLocked(ActivityRecord r,
+            ProcessRecord app, boolean andResume, boolean checkConfig)
+            throws RemoteException {
+	    ...
+        r.app = app;
+        app.waitingToKill = null;
+        r.launchCount++;
+        r.lastLaunchTime = SystemClock.uptimeMillis();
+
+        final ActivityStack stack = task.stack;
+        try {
+            if (app.thread == null) {
+                throw new RemoteException();
+            }
+            ...
+		   // 跨进程启动Activity
+            app.thread.scheduleLaunchActivity(new Intent(r.intent), r.appToken,
+                    System.identityHashCode(r), r.info, new Configuration(mService.mConfiguration),
+                    new Configuration(stack.mOverrideConfig), r.compat, r.launchedFromPackage,
+                    task.voiceInteractor, app.repProcState, r.icicle, r.persistentState, results,
+                    newIntents, !andResume, mService.isNextTransitionForward(), profilerInfo);
+		   ...
+        } catch (RemoteException e) {
+            if (r.launchFailed) {
+                mService.appDiedLocked(app);
+                stack.requestFinishActivityLocked(r.appToken, Activity.RESULT_CANCELED, null,
+                        "2nd-crash", false);
+                return false;
+            }
+            app.activities.remove(r);
+            throw e;
+        }
+
+        if (andResume) {
+            stack.minimalResumeActivityLocked(r);
+        } 
+
+        mService.mServices.updateServiceConnectionActivitiesLocked(r.app);
+
+        return true;
+    }
+
+```
+
+该函数执行真正启动Activity的操作：
+
+- 将ProcessRecord 和 ActivityRecord 关联
+- 跨进程调用 **IApplicationThread.scheduleLaunchActivity()**，启动Activity
+- 调用 `ActivityStack.minimalResumeActivityLocked()`显示Activity 
+
+#### 7、ActivityThread & handleLaunchActivity
+
+ActivityThread 的 内部类`ApplicationThread` 的 `scheduleLaunchActivity()` 方法收到启动Activity的请求，通过Handler机制，在主线程中执行`handleLaunchActivity()`方法
+
+```java
+    private void handleLaunchActivity(ActivityClientRecord r, Intent customIntent) {
+        unscheduleGcIdler();
+        mSomeActivitiesChanged = true;
+
+        if (r.profilerInfo != null) {
+            mProfiler.setProfiler(r.profilerInfo);
+            mProfiler.startProfiling();
+        }
+        handleConfigurationChanged(null, null);
+        WindowManagerGlobal.initialize();
+	    // 执行Activity启动
+        Activity a = performLaunchActivity(r, customIntent);
+
+        if (a != null) {
+            r.createdConfig = new Configuration(mConfiguration);
+            Bundle oldState = r.state;
+            // 执行Activity显示
+            handleResumeActivity(r.token, false, r.isForward,
+                    !r.activity.mFinished && !r.startsNotResumed);
+
+            if (!r.activity.mFinished && r.startsNotResumed) {
+                try {
+                    r.activity.mCalled = false;
+                    mInstrumentation.callActivityOnPause(r.activity);
+
+                    if (r.isPreHoneycomb()) {
+                        r.state = oldState;
+                    }
+
+                } catch (SuperNotCalledException e) { } 
+                r.paused = true;
+            }
+        } else {
+            try {
+                ActivityManagerNative.getDefault()
+                    .finishActivity(r.token, Activity.RESULT_CANCELED, null, false);
+            } catch (RemoteException ex) { }
+        }
+    }
+```
+
+- 调用 **ActivityThread.performLaunchActivity()** 方法启动`Activity`并返回该Activity对象
+
+- 根据返回的`Activity` 判断是否启动成功。如果成功调用 **handleResumeActivity() ** 方法，显示Activity，否则
+
+  调用**IActivityManager.finishActivity()** 方法来结束该Activity启动
+
+#### 8、ActivityThread & performLaunchActivity()
+
+```java
+    private Activity performLaunchActivity(ActivityClientRecord r, Intent customIntent) {
+
+        ActivityInfo aInfo = r.activityInfo;
+        if (r.packageInfo == null) {
+            r.packageInfo = getPackageInfo(aInfo.applicationInfo, r.compatInfo,
+                    Context.CONTEXT_INCLUDE_CODE);
+        }
+
+        ComponentName component = r.intent.getComponent();
+        if (component == null) {
+            component = r.intent.resolveActivity(
+                mInitialApplication.getPackageManager());
+            r.intent.setComponent(component);
+        }
+
+        if (r.activityInfo.targetActivity != null) {
+            component = new ComponentName(r.activityInfo.packageName,
+                    r.activityInfo.targetActivity);
+        }
+
+        Activity activity = null;
+        try {
+            ClassLoader cl = r.packageInfo.getClassLoader();
+            // 反射创建Activity对象
+            activity = mInstrumentation.newActivity(
+                    cl, component.getClassName(), r.intent);
+            ...
+        } catch (Exception e) { }
+
+        try {
+            // 获得Application，如果没有则通过 LoadedApk.makeApplication()方法创建
+            Application app = r.packageInfo.makeApplication(false, mInstrumentation);
+
+            if (activity != null) {
+                // 创建Context对象，通过ContextImpl.createActivityContext()创建
+                Context appContext = createBaseContextForActivity(r, activity);
+                CharSequence title = r.activityInfo.loadLabel(appContext.getPackageManager());
+                Configuration config = new Configuration(mCompatConfiguration);
+                // 调用Activity的attach()方法
+                activity.attach(appContext, this, getInstrumentation(), r.token,
+                        r.ident, app, r.intent, r.activityInfo, title, r.parent,
+                        r.embeddedID, r.lastNonConfigurationInstances, config,
+                        r.referrer, r.voiceInteractor);
+
+                if (customIntent != null) {
+                    activity.mIntent = customIntent;
+                }
+                r.lastNonConfigurationInstances = null;
+                activity.mStartedActivity = false;
+                int theme = r.activityInfo.getThemeResource();
+                if (theme != 0) {
+                    activity.setTheme(theme);
+                }
+
+                activity.mCalled = false;
+                // 调用Activity的onCreate()方法
+                if (r.isPersistable()) {
+                    mInstrumentation.callActivityOnCreate(activity, r.state, r.persistentState);
+                } else {
+                    mInstrumentation.callActivityOnCreate(activity, r.state);
+                }
+                r.activity = activity;
+                r.stopped = true;
+                // 调用Activity的onStart()方法
+                if (!r.activity.mFinished) {
+                    activity.performStart();
+                    r.stopped = false;
+                }
+                if (!r.activity.mFinished) {
+                    if (r.isPersistable()) {
+                        if (r.state != null || r.persistentState != null) {
+                            mInstrumentation.callActivityOnRestoreInstanceState(activity, r.state,
+                                    r.persistentState);
+                        }
+                    } else if (r.state != null) {
+                        mInstrumentation.callActivityOnRestoreInstanceState(activity, r.state);
+                    }
+                }
+                if (!r.activity.mFinished) {
+                    activity.mCalled = false;
+                    if (r.isPersistable()) {
+                        mInstrumentation.callActivityOnPostCreate(activity, r.state,
+                                r.persistentState);
+                    } else {
+                        mInstrumentation.callActivityOnPostCreate(activity, r.state);
+                    }
+                }
+            }
+            r.paused = true;
+            mActivities.put(r.token, r);
+        } catch (Exception e) { }
+        return activity;
+    }
+```
+
+该方法主要做了：
+
+- 初始化一些参数。
+- 新建 Activity 对象。
+- 调用 **Activity.onCreate()** 方法
+- 调用 **Activity.onStart()** 方法
+
+#### 9、ActivityThread & handleResumeActivity()
+
+```java
+    public final ActivityClientRecord performResumeActivity(IBinder token,
+            boolean clearHide) {
+        ActivityClientRecord r = mActivities.get(token);
+
+        if (r != null && !r.activity.mFinished) {
+  
+            try {
+                ...
+                // 执行onResume
+                r.activity.performResume();
+
+                r.paused = false;
+                r.stopped = false;
+                r.state = null;
+                r.persistentState = null;
+            } catch (Exception e) {}
+        }
+        return r;
+    }
+```
+
+然后执行 **Activity.performResume()** -> **Instrumentation.callActivityOnResume()** -> **Activity.onResume()**
+
+至此Activity 已经显示在屏幕上了。
+
+
+
+
