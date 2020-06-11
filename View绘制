@@ -1,0 +1,420 @@
+### 1、Activity & attach()  
+
+### 1.0、设置/初始化 `WindowManager`
+
+```java
+    // 设置WindowManager    
+	mWindow.setWindowManager(
+                (WindowManager)context.getSystemService(Context.WINDOW_SERVICE),
+                mToken, mComponent.flattenToString(),
+                (info.flags & ActivityInfo.FLAG_HARDWARE_ACCELERATED) != 0);
+        if (mParent != null) {
+            mWindow.setContainer(mParent.getWindow());
+        }
+	   // 赋值
+        mWindowManager = mWindow.getWindowManager();
+```
+
+#### 1.1 Window & setWindowManager()
+
+```java
+    public void setWindowManager(WindowManager wm, IBinder appToken, String appName,
+            boolean hardwareAccelerated) {
+        mAppToken = appToken;
+        mAppName = appName;
+        mHardwareAccelerated = hardwareAccelerated;
+        if (wm == null) {
+            wm = (WindowManager)mContext.getSystemService(Context.WINDOW_SERVICE);
+        }
+        mWindowManager = ((WindowManagerImpl)wm).createLocalWindowManager(this);
+    }
+```
+
+创建`WindowManager` 对象
+
+#### 1.2 WindowManager 和 ViewManager
+
+```java
+public interface WindowManager extends ViewManager {
+    ...
+	public static class LayoutParams extends ViewGroup.LayoutParams implements Parcelable {
+        ...
+    }
+}
+```
+
+`WindowManager` 是一个接口，里面规定了一些Window的熟悉值和封装了`LayoutParams`内部类，同时又集成`ViewManager` 接口
+
+```java
+/** Interface to let you add and remove child views to an Activity. To get an instance
+  * of this class, call {@link android.content.Context#getSystemService(java.lang.String) Context.getSystemService()}.
+  */
+public interface ViewManager
+{
+    /**
+     * Assign the passed LayoutParams to the passed View and add the view to the window.
+     * <p>Throws {@link android.view.WindowManager.BadTokenException} for certain programming
+     * errors, such as adding a second view to a window without removing the first view.
+     * <p>Throws {@link android.view.WindowManager.InvalidDisplayException} if the window is on a
+     * secondary {@link Display} and the specified display can't be found
+     * (see {@link android.app.Presentation}).
+     * @param view The view to be added to this window.
+     * @param params The LayoutParams to assign to view.
+     */
+    public void addView(View view, ViewGroup.LayoutParams params);
+    public void updazhteViewLayout(View view, ViewGroup.LayoutParams params);
+    public void removeView(View view);
+}
+```
+
+而`ViewManager` 只提供了三个方法：
+
+- addView() : 添加View到Window
+- updazhteViewLayout() : 更新View
+- removeView() : 从Window移除View
+
+`WindowManager ` 和 `ViewManager` 都是接口，因此，上面三个方法的具体实现，在`WindowManager `的实现类`WindowManagerImpl` 中
+
+```java
+    public WindowManagerImpl createLocalWindowManager(Window parentWindow) {
+        return new WindowManagerImpl(mContext, parentWindow);
+    }
+```
+
+创建`WindowManager` 的实现类 `WindowManagerImpl`
+
+#### 1.3、WindowManagerImpl
+
+```java
+public final class WindowManagerImpl implements WindowManager {
+    @UnsupportedAppUsage
+    private final WindowManagerGlobal mGlobal = WindowManagerGlobal.getInstance();
+    private final Context mContext;
+    private final Window mParentWindow;
+
+    private IBinder mDefaultToken;
+
+    public WindowManagerImpl(Context context) {
+        this(context, null);
+    }
+
+    private WindowManagerImpl(Context context, Window parentWindow) {
+        mContext = context;
+        mParentWindow = parentWindow;
+    }
+
+    public WindowManagerImpl createLocalWindowManager(Window parentWindow) {
+        return new WindowManagerImpl(mContext, parentWindow);
+    }
+
+    public WindowManagerImpl createPresentationWindowManager(Context displayContext) {
+        return new WindowManagerImpl(displayContext, mParentWindow);
+    }
+
+    /**
+     * Sets the window token to assign when none is specified by the client or
+     * available from the parent window.
+     *
+     * @param token The default token to assign.
+     */
+    public void setDefaultToken(IBinder token) {
+        mDefaultToken = token;
+    }
+
+    @Override
+    public void addView(@NonNull View view, @NonNull ViewGroup.LayoutParams params) {
+        applyDefaultToken(params);
+        mGlobal.addView(view, params, mContext.getDisplay(), mParentWindow);
+    }
+
+    @Override
+    public void updateViewLayout(@NonNull View view, @NonNull ViewGroup.LayoutParams params) {
+        applyDefaultToken(params);
+        mGlobal.updateViewLayout(view, params);
+    }
+
+    private void applyDefaultToken(@NonNull ViewGroup.LayoutParams params) {
+        // Only use the default token if we don't have a parent window.
+        if (mDefaultToken != null && mParentWindow == null) {
+            if (!(params instanceof WindowManager.LayoutParams)) {
+                throw new IllegalArgumentException("Params must be WindowManager.LayoutParams");
+            }
+
+            // Only use the default token if we don't already have a token.
+            final WindowManager.LayoutParams wparams = (WindowManager.LayoutParams) params;
+            if (wparams.token == null) {
+                wparams.token = mDefaultToken;
+            }
+        }
+    }
+
+    @Override
+    public void removeView(View view) {
+        mGlobal.removeView(view, false);
+    }
+
+    @Override
+    public void removeViewImmediate(View view) {
+        mGlobal.removeView(view, true);
+    }
+
+    ...
+}
+
+```
+
+`WindowManagerImpl` 是 `WindowManager` 的实现类，所以了解其内部构造非常重要。值得注意的有：
+
+- `WindowManagerGlobal mGlobal = WindowManagerGlobal.getInstance();` 声明了一个全局的`WindowManagerGlobal `对象，`WindowManagerGlobal ` 负责处理`WindowManager`具体操作
+- `addView()` 、`removeView()`、`updateViewLayout()`等具体实现都在`WindowManagerGlobal`中
+
+### 2、Activity Thread & handleResumeActivity()
+
+```java
+    @Override
+    public void handleResumeActivity(IBinder token, boolean finalStateRequest, boolean isForward,
+            String reason) {
+        ...
+        // 执行Activity.Resume()方法
+        final ActivityClientRecord r = performResumeActivity(token, finalStateRequest, reason);
+        ...
+        final Activity a = r.activity;
+
+        ...
+        if (r.window == null && !a.mFinished && willBeVisible) {
+            ViewManager wm = a.getWindowManager();
+            ...
+            if (a.mVisibleFromClient) {
+                if (!a.mWindowAdded) {
+                    a.mWindowAdded = true;
+                    // 将DecorView添加到Window上
+                    wm.addView(decor, l);
+                } else {
+                    a.onWindowAttributesChanged(l);
+                }
+            }
+
+        } else if (!willBeVisible) {
+            ...
+        }
+
+      ...
+    }
+
+```
+
+在`Activity`执行`performResumeActivity`以后，会执行`ViewManager.addView()`方法，将`DecorView`添加到Window上。
+
+WindowManager的实现类是`WindowManagerImpl`
+
+```java
+    @Override
+    public void addView(@NonNull View view, @NonNull ViewGroup.LayoutParams params) {
+        applyDefaultToken(params);
+        mGlobal.addView(view, params, mContext.getDisplay(), mParentWindow);
+    }
+```
+
+然后执行`WindowManagerGlobal.addView()`方法
+
+### 3、WindowManagerGlobal  &  addView()
+
+```java
+    public void addView(View view, ViewGroup.LayoutParams params,
+            Display display, Window parentWindow) {
+        ...
+
+        final WindowManager.LayoutParams wparams = (WindowManager.LayoutParams) params;
+        if (parentWindow != null) {
+            parentWindow.adjustLayoutParamsForSubWindow(wparams);
+        } else {
+            ...
+        }
+
+        ViewRootImpl root;
+        View panelParentView = null;
+
+        synchronized (mLock) {
+          
+           ...
+
+            root = new ViewRootImpl(view.getContext(), display);
+
+            view.setLayoutParams(wparams);
+
+            mViews.add(view);
+            mRoots.add(root);
+            mParams.add(wparams);
+
+            // do this last because it fires off messages to start doing things
+            try {
+                root.setView(view, wparams, panelParentView);
+            } catch (RuntimeException e) {
+                
+                throw e;
+            }
+        }
+    }
+```
+
+通过调用`root.setView()`将DecorView加入到Window中
+
+### 4、ViewRootImpl  &  setView()
+
+```java
+    public void setView(View view, WindowManager.LayoutParams attrs, View panelParentView) {
+        synchronized (this) {
+            if (mView == null) {
+                mView = view;
+                ... 
+                view.assignParent(this);
+                ...
+                requestLayout();
+                ...
+            }
+        }
+    }
+```
+
+- 将 `DecorView` 赋值给 `mView`
+
+-  调用`view.assignParent(this)` 将 `ViewRootImpl` 赋值给View中的`mParent`。
+
+  ```java
+      void assignParent(ViewParent parent) {
+          if (mParent == null) {
+              mParent = parent;
+          } else if (parent == null) {
+              mParent = null;
+          } else {
+              throw new RuntimeException("view " + this + " being added, but"
+                      + " it already has a parent");
+          }
+      }
+  ```
+
+- 执行`requestLayout()` 进行绘制
+
+继续执行`requestLayout()`
+
+```java
+    @Override
+    public void requestLayout() {
+        if (!mHandlingLayoutInLayoutRequest) {
+            checkThread();
+            mLayoutRequested = true;
+            scheduleTraversals();
+        }
+    }
+```
+
+执行`scheduleTraversals();`
+
+```java
+   void scheduleTraversals() {
+        if (!mTraversalScheduled) {
+            mTraversalScheduled = true;
+            mTraversalBarrier = mHandler.getLooper().getQueue().postSyncBarrier();
+            mChoreographer.postCallback(
+                    Choreographer.CALLBACK_TRAVERSAL, mTraversalRunnable, null);
+            if (!mUnbufferedInputDispatch) {
+                scheduleConsumeBatchedInput();
+            }
+            notifyRendererOfFramePending();
+            pokeDrawLockIfNeeded();
+        }
+    }
+```
+
+通过`mChoreographer.postCallback()`执行`mTraversalRunnable`，在异步中执行绘制操作。
+
+```java
+    final class TraversalRunnable implements Runnable {
+        @Override
+        public void run() {
+            doTraversal();
+        }
+    }
+
+    void doTraversal() {
+        if (mTraversalScheduled) {
+            mTraversalScheduled = false;
+            mHandler.getLooper().getQueue().removeSyncBarrier(mTraversalBarrier);
+
+            if (mProfile) {
+                Debug.startMethodTracing("ViewAncestor");
+            }
+
+            performTraversals();
+
+            if (mProfile) {
+                Debug.stopMethodTracing();
+                mProfile = false;
+            }
+        }
+    }
+```
+
+最后会执行`performTraversals()`执行View的绘制操作
+
+### 5、ViewRootImpl  &  performTraversals() 
+
+```java
+    private void performTraversals() {
+        ...
+        // Ask host how big it wants to be
+        performMeasure(childWidthMeasureSpec, childHeightMeasureSpec);
+        ...
+        if (didLayout) {
+            performLayout(lp, mWidth, mHeight); 
+        }
+        ...
+   		performDraw();
+        ...
+    }
+```
+
+该方法会依次执行 `performMeasure()`、`performLayout()`、`performDraw()` 等方法，分别对View进行测量、布局、绘制
+
+### 二、requestLayout() 原理
+
+在自定义`View`和 `ViewGroup` 的时候，我们可以通过调用 `requestLayout()` 来对View重新进行测量、布局和绘制。
+
+`requestLayout()` 源码如下：
+
+```java
+    public void requestLayout() {
+        if (mMeasureCache != null) mMeasureCache.clear();
+
+        if (mAttachInfo != null && mAttachInfo.mViewRequestingLayout == null) {
+            // Only trigger request-during-layout logic if this is the view requesting it,
+            // not the views in its parent hierarchy
+            ViewRootImpl viewRoot = getViewRootImpl();
+            if (viewRoot != null && viewRoot.isInLayout()) {
+                if (!viewRoot.requestLayoutDuringLayout(this)) {
+                    return;
+                }
+            }
+            mAttachInfo.mViewRequestingLayout = this;
+        }
+
+        mPrivateFlags |= PFLAG_FORCE_LAYOUT;
+        mPrivateFlags |= PFLAG_INVALIDATED;
+
+        if (mParent != null && !mParent.isLayoutRequested()) {
+            mParent.requestLayout();
+        }
+        if (mAttachInfo != null && mAttachInfo.mViewRequestingLayout == this) {
+            mAttachInfo.mViewRequestingLayout = null;
+        }
+    }
+
+```
+
+会调用 `mParent.requestLayout()`
+
+`ViewParent` 是一个接口，而在上面第4步 `ViewRootImpl.setView()  ` 方法中会调用 `view.assignParent(this);` 方法，将`ViewRootImpl` 赋值给 `mParent` 。
+
+因此调用 `mParent.requestLayout()` 会执行 `ViewRootImpl. requestLayout()` 方法，继而执行`performTraversals()`方法，对View进行测量、布局和绘制操作
+
+
