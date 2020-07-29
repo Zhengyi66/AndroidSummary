@@ -21,14 +21,7 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.annotation.RequiresApi;
 
-/**
- * [一句话功能简述]<BR>
- * [功能详细描述]<BR>
- *
- * @author zWX921533
- * @version [V8.20.8.1, 2020/4/18]
- * @since V8.20.8.1
- */
+
 public class MediaPlayerActivity extends Activity implements View.OnClickListener {
 
     MediaPlayer mMediaPlayer;
