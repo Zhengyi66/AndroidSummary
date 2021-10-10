@@ -1,0 +1,334 @@
+
+
+### 一、Service启动方式
+
+- startService() ：启动服务，启动之后，就和组件无关了，和Activity没有交互
+- bindService() ：绑定服务，通过ServiceConnect和Activity交互。Activity销毁时，需要解除绑定
+
+### 二、Service生命周期
+
+#### 1、startService
+
+`oncreate -> onStartCommand -> onDestroy`
+
+多次重复启动会多次执行`onStartCommand `
+
+#### 2、bindService
+
+`onCreate -> onBind -> onUnBind -> onDestroy`
+
+多次绑定不会走生命周期方法
+
+#### 3、同时执行startService 和 bindService
+
+onCreate 和 onDestroy 只会执行一次。
+
+stopService 和 unbindService 都执行才会触发 onDestroy方法。只执行一个不会触发onDestroy 方法
+
+#### 三、startService 启动流程
+
+#### 1、ContextWrapper # startService 
+
+```java
+    @Override
+    public ComponentName startService(Intent service) {
+        return mBase.startService(service);
+    }
+```
+
+#### 2、ContextImpl # startService # 
+
+```java
+    @Override
+    public ComponentName startService(Intent service) {
+        warnIfCallingFromSystemProcess();
+        return startServiceCommon(service, false, mUser);
+    }
+    private ComponentName startServiceCommon(Intent service, boolean requireForeground,
+            UserHandle user) {
+        try {
+            // android5.0之后，隐士启动会抛出IllegalArgumentException异常
+            validateServiceIntent(service);
+            service.prepareToLeaveProcess(this);
+            ComponentName cn = ActivityManager.getService().startService(
+                    mMainThread.getApplicationThread(), service,
+                    service.resolveTypeIfNeeded(getContentResolver()), requireForeground,
+                    getOpPackageName(), getAttributionTag(), user.getIdentifier());
+            ...
+```
+
+#### 3、AMS # startService # 
+
+```java
+    @Override
+    public ComponentName startService(IApplicationThread caller, Intent service,
+            String resolvedType, boolean requireForeground, String callingPackage, int userId)
+            throws TransactionTooLargeException {
+     	...
+        synchronized(this) {
+            final int callingPid = Binder.getCallingPid();
+            final int callingUid = Binder.getCallingUid();
+            final long origId = Binder.clearCallingIdentity();
+            ComponentName res;
+            try {
+                res = mServices.startServiceLocked(caller, service,
+                        resolvedType, callingPid, callingUid,
+                        requireForeground, callingPackage, userId);
+            } finally {
+                Binder.restoreCallingIdentity(origId);
+            }
+            return res;
+        }
+    }
+```
+
+该方法中首先会校验包名和Service所在进程是否存在，以及一些权限检测。
+
+#### 4、ActiveServices # startServiceLocked
+
+```java
+    ComponentName startServiceLocked(IApplicationThread caller, Intent service, String resolvedType,
+            int callingPid, int callingUid, boolean fgRequired, String callingPackage, final int userId)
+            throws TransactionTooLargeException {
+		...
+
+        ComponentName cmp = startServiceInnerLocked(smap, service, r, callerFg, addToStarting);
+        return cmp;
+    }
+```
+
+该方法主要做了一些校验和检查，初始化ServiceRecord等必要参数。
+
+然后执行 `startServiceInnerLocked` 和 `bringUpServiceLocked`方法
+
+#### 5、bringUpServiceLocked
+
+```java
+    private String bringUpServiceLocked(ServiceRecord r, int intentFlags, boolean execInFg,
+            boolean whileRestarting, boolean permissionsReviewRequired)
+            throws TransactionTooLargeException {
+        //Slog.i(TAG, "Bring up service:");
+        //r.dump("  ");
+
+        if (r.app != null && r.app.thread != null) {
+            // 表示Service已经创建，执行onStartCommand方法
+            sendServiceArgsLocked(r, execInFg, false);
+            return null;
+        }
+        ...
+              // 真正启动Service
+              realStartServiceLocked(r, app, execInFg);     
+```
+
+- 首先会判断Service是否已经创建启动，如果已经启动后，则执行`sendServiceArgsLocked`执行service的`onStartCommand`方法
+- 如果Service没有启动，则执行`realStartServiceLocked`创建并启动Service
+
+```java
+    private final void sendServiceArgsLocked(ServiceRecord r, boolean execInFg,
+            boolean oomAdjusted) throws TransactionTooLargeException {
+        ...
+   		r.app.thread.scheduleServiceArgs(r, slice);
+        ...
+```
+
+通过Binder机制，调用ApplicationThread的`scheduleServiceArgs`方法，然后通过Handler切换线程，执行Activity的`handleServiceArgs()`方法
+
+```java
+    private void handleServiceArgs(ServiceArgsData data) {
+        Service s = mServices.get(data.token);
+        if (s != null) {
+            try {
+                if (data.args != null) {
+                    data.args.setExtrasClassLoader(s.getClassLoader());
+                    data.args.prepareToEnterProcess();
+                }
+                int res;
+                if (!data.taskRemoved) {
+                    // 执行Service的onStartCommand
+                    res = s.onStartCommand(data.args, data.flags, data.startId);
+                } else {
+                    s.onTaskRemoved(data.args);
+                    res = Service.START_TASK_REMOVED_COMPLETE;
+                }
+	...
+```
+
+执行Service的`onStartCommand`
+
+#### 6、ActiveServices # realStartServiceLocked
+
+```java
+    private final void realStartServiceLocked(ServiceRecord r,
+            ProcessRecord app, boolean execInFg) throws RemoteException {
+		...
+            app.thread.scheduleCreateService(r, r.serviceInfo,
+                    mAm.compatibilityInfoForPackageLocked(r.serviceInfo.applicationInfo),
+                    app.repProcState);
+        ...
+        
+```
+
+执行`app.thread.scheduleCreateService`方法，通过Binder机制，执行ApplicationThread的scheduleCreateService方法，通过Handler切换线程后，执行ActivityThread的handleCreateService方法
+
+#### 7、ActivityThread # handleCreateService
+
+```java
+    private void handleCreateService(CreateServiceData data) {        LoadedApk packageInfo = getPackageInfoNoCheck(                data.info.applicationInfo, data.compatInfo);        Service service = null;        try {            // 通过ClassLoader的newInstance方法创建Service对象            java.lang.ClassLoader cl = packageInfo.getClassLoader();            service = (Service) cl.loadClass(data.info.name).newInstance();        } catch (Exception e) {        }        try {            // 创建ContextImpl            ContextImpl context = ContextImpl.createAppContext(this, packageInfo);            context.setOuterContext(service);			// 创建Application            Application app = packageInfo.makeApplication(false, mInstrumentation);            // 调用service.attach()方法            service.attach(context, this, data.info.name, data.token, app,                    ActivityManager.getService());            // 调用service的onCreate            service.onCreate();            mServices.put(data.token, service);			...        } catch (Exception e) {        }
+```
+
+### 四、bindService 绑定流程
+
+#### 1、ContextWrapper # bindService
+
+```java
+    @Override    public boolean bindService(Intent service, int flags, Executor executor,            ServiceConnection conn) {        return mBase.bindService(service, flags, executor, conn);    }
+```
+
+
+
+#### 2、ContextImpl # bindService
+
+```java
+    @Override    public boolean bindService(Intent service, ServiceConnection conn,            int flags) {        warnIfCallingFromSystemProcess();        return bindServiceCommon(service, conn, flags, mMainThread.getHandler(),                Process.myUserHandle());    }    private boolean bindServiceCommon(Intent service, ServiceConnection conn, int flags, Handler            handler, UserHandle user) {        // Keep this in sync with DevicePolicyManager.bindDeviceAdminServiceAsUser.        // 通过IServiceConnection接受绑定服务成功的回调        IServiceConnection sd;        if (conn == null) {            throw new IllegalArgumentException("connection is null");        }        if (mPackageInfo != null) {            // 将ServiceConnection与IServiceConnection关联            sd = mPackageInfo.getServiceDispatcher(conn, getOuterContext(), handler, flags);        } else {            throw new RuntimeException("Not supported in system context");        }        // android5.0之后，隐式启动抛出IllegalArgumentException        validateServiceIntent(service);        try {            IBinder token = getActivityToken();            if (token == null && (flags&BIND_AUTO_CREATE) == 0 && mPackageInfo != null                    && mPackageInfo.getApplicationInfo().targetSdkVersion                    < android.os.Build.VERSION_CODES.ICE_CREAM_SANDWICH) {                flags |= BIND_WAIVE_PRIORITY;            }            service.prepareToLeaveProcess(this);            int res = ActivityManager.getService().bindService(                mMainThread.getApplicationThread(), getActivityToken(), service,                service.resolveTypeIfNeeded(getContentResolver()),                sd, flags, getOpPackageName(), user.getIdentifier());            if (res < 0) {                throw new SecurityException(                        "Not allowed to bind to service " + service);            }            return res != 0;        } catch (RemoteException e) {            throw e.rethrowFromSystemServer();        }    }
+```
+
+`ServiceConnection`只是一个普通的接口，不具备跨进程回调的能力，Android提供了一个IServiceConnection接口来实现跨进程回调服务的绑定接口。通过`ServiceDispatcher`将`IServiceConnection`和`ServiceConnection`接口关联起来，当`IServiceConnection`收到绑定结果时在`ServiceConnection`的方法。
+
+#### 3、IServiceConnection跨进程回调ServiceConnection
+
+```java
+    static final class ServiceDispatcher {        // 具备跨进程能力的IServiceConnection        private final ServiceDispatcher.InnerConnection mIServiceConnection;        // 普通的ServiceConnection接口        private final ServiceConnection mConnection;        private final Context mContext;        // Handler，不为null        private final Handler mActivityThread;        private final ServiceConnectionLeaked mLocation;        private final int mFlags;        private static class ConnectionInfo {            IBinder binder;            IBinder.DeathRecipient deathMonitor;        }		// 作为Binder机制的服务端，接收绑定服务的通知        private static class InnerConnection extends IServiceConnection.Stub {            final WeakReference<LoadedApk.ServiceDispatcher> mDispatcher;            InnerConnection(LoadedApk.ServiceDispatcher sd) {                mDispatcher = new WeakReference<LoadedApk.ServiceDispatcher>(sd);            }            public void connected(ComponentName name, IBinder service, boolean dead)                    throws RemoteException {                LoadedApk.ServiceDispatcher sd = mDispatcher.get();                if (sd != null) {                    sd.connected(name, service, dead);                }            }        }
+```
+
+- **ServiceDispatcher**内部封装了InnerConnection类（是一个Binder类）和ServiceConnection接口。目的是为了跨进程接受服务绑定的结果。
+
+- **InnerConnection**是ServiceDispatcher的内部类，继承自 IServiceConnection.Stub类，是Binder机制中的Server端。该类内部提供了一个`connected()`方法供Client端调用，将Service的绑定结果通知过来
+
+通过Binder机制，调用AMS的bindService方法，同时将IServiceConnection的代理传递过去
+
+#### 4、AMS # bindService
+
+```java
+    public int bindService(IApplicationThread caller, IBinder token, Intent service,            String resolvedType, IServiceConnection connection, int flags, String callingPackage,            int userId) throws TransactionTooLargeException {        ...        synchronized(this) {            return mServices.bindServiceLocked(caller, token, service,                    resolvedType, connection, flags, callingPackage, userId);        }    }
+```
+
+#### 5、ActiveServices # bindServiceLocked # 
+
+该方法比较长，但主要还是一些准备已经校验，后面会执行bringUpServiceLocked方法
+
+- 会判断要绑定的Service所在的进程是否存在，即Service是否注册
+- 判断绑定页面的Activity是否存在
+- 权限校验
+
+最后会执行bringUpServiceLocked方法。
+
+在bringUpServiceLocked方法中，如果Service没有被创建，则会执行realStartServiceLocked方法。 和startService一样，在realStartServiceLocked方法中也会通过app.thread.scheduleCreateService最终在ActivityThread中执行scheduleCreateService。然后通过Handler机制，执行ActivityThread的handleCreateService方法
+
+#### 6、ActivityThread # handleCreateService # 
+
+在handleCreateService中方法和startService一样，通过类加载机制创建Service对象，创建ContextImpl对象，调用Service的attach()和 **`onCreate()`**。将创建的service存储起来。下次使用就可以直接获取。
+
+#### 7、ActiveServices # requestServiceBindingLocked
+
+在`bindServiceLocked`方法，除了支持Service的创建外，还会执行`requestServiceBindingLocked`方法来绑定服务
+
+```java
+    private final boolean requestServiceBindingLocked(ServiceRecord r, IntentBindRecord i,            boolean execInFg, boolean rebind) throws TransactionTooLargeException {        // 如果服务已经启动，return        if (r.app == null || r.app.thread == null) {            // If service is not currently running, can't yet bind.            return false;        }        if ((!i.requested || rebind) && i.apps.size() > 0) {            try {                bumpServiceExecutingLocked(r, execInFg, "bind");                r.app.forceProcessStateUpTo(ActivityManager.PROCESS_STATE_SERVICE);                r.app.thread.scheduleBindService(r, i.intent.getIntent(), rebind,                        r.app.repProcState);                if (!rebind) {                    i.requested = true;                }                i.hasBound = true;                i.doRebind = false;            } catch (TransactionTooLargeException e) {                ...                throw e;            } catch (RemoteException e) {                ...                return false;            }        }        return true;    }
+```
+
+调用ApplicationThread的`scheduleBindService`绑定服务
+
+#### 8、ActivityThread # handleBindService
+
+```java
+    private void handleBindService(BindServiceData data) {        // 此时Service已经创建成功，所有mServices能够取到        Service s = mServices.get(data.token);        if (s != null) {            try {                data.intent.setExtrasClassLoader(s.getClassLoader());                data.intent.prepareToEnterProcess();                try {                    if (!data.rebind) {                        // 调用onBind方法                        IBinder binder = s.onBind(data.intent);                        ActivityManager.getService().publishService(                                data.token, data.intent, binder);                    } else {                        s.onRebind(data.intent);                        ActivityManager.getService().serviceDoneExecuting(                                data.token, SERVICE_DONE_EXECUTING_ANON, 0, 0);                    }                    ensureJitEnabled();                } catch (RemoteException ex) {                    throw ex.rethrowFromSystemServer();                }            } catch (Exception e) {                ...            }        }    }
+```
+
+执行Service的`onBind()`方法，然后执行AMS的publishService方法，将绑定服务结果返回
+
+#### 9、AMS # publishService # 
+
+```java
+    public void publishService(IBinder token, Intent intent, IBinder service) {        // Refuse possible leaked file descriptors        if (intent != null && intent.hasFileDescriptors() == true) {            throw new IllegalArgumentException("File descriptors passed in Intent");        }        synchronized(this) {            if (!(token instanceof ServiceRecord)) {                throw new IllegalArgumentException("Invalid service token");            }            mServices.publishServiceLocked((ServiceRecord)token, intent, service);        }    }
+```
+
+#### 10、ActiveServices # publishServiceLocked # 
+
+```java
+    void publishServiceLocked(ServiceRecord r, Intent intent, IBinder service) {        final long origId = Binder.clearCallingIdentity();        try {            if (r != null) {                Intent.FilterComparison filter                        = new Intent.FilterComparison(intent);                IntentBindRecord b = r.bindings.get(filter);                if (b != null && !b.received) {                    b.binder = service;                    b.requested = true;                    b.received = true;                    for (int conni=r.connections.size()-1; conni>=0; conni--) {                        ArrayList<ConnectionRecord> clist = r.connections.valueAt(conni);                        for (int i=0; i<clist.size(); i++) {                            // 获取ConnectionRecord                            ConnectionRecord c = clist.get(i);                            ...                            if (DEBUG_SERVICE) Slog.v(TAG_SERVICE, "Publishing to: " + c);                            try {                                // 执行IServiceConnect的connected方法                                c.conn.connected(r.name, service, false);                            } catch (Exception e) {                                ...                            }                        }                    }                }                serviceDoneExecutingLocked(r, mDestroyingServices.contains(r), false);            }        } finally {            Binder.restoreCallingIdentity(origId);        }    }
+```
+
+该方法主要是调用` c.conn.connected(r.name, service, false);`将绑定服务的结果返回给服务端。
+
+```java
+/** * Description of a single binding to a service. */final class ConnectionRecord {    final AppBindRecord binding;    // The application/service binding.    final ActivityRecord activity;  // If non-null, the owning activity.    final IServiceConnection conn;  // The client connection.    final int flags;                // Binding options.    final int clientLabel;          // String resource labeling this client.    final PendingIntent clientIntent; // How to launch the client.    String stringName;              // Caching of toString.    boolean serviceDead;     
+```
+
+#### 11、ServiceDispatcher.InnerConnection接收绑定结果
+
+```java
+        private static class InnerConnection extends IServiceConnection.Stub {            final WeakReference<LoadedApk.ServiceDispatcher> mDispatcher;            InnerConnection(LoadedApk.ServiceDispatcher sd) {                mDispatcher = new WeakReference<LoadedApk.ServiceDispatcher>(sd);            }            public void connected(ComponentName name, IBinder service, boolean dead)                    throws RemoteException {                LoadedApk.ServiceDispatcher sd = mDispatcher.get();                if (sd != null) {                    sd.connected(name, service, dead);                }            }        }
+```
+
+- 执行connected方法
+
+  ```java
+          public void connected(ComponentName name, IBinder service, boolean dead) {            if (mActivityThread != null) {                // Handler不为null                mActivityThread.post(new RunConnection(name, service, 0, dead));            } else {                doConnected(name, service, dead);            }        }
+  ```
+
+  
+
+- 执行RunConnection
+
+  ```java
+          private final class RunConnection implements Runnable {            RunConnection(ComponentName name, IBinder service, int command, boolean dead) {                mName = name;                mService = service;                mCommand = command;                mDead = dead;            }            public void run() {                if (mCommand == 0) {                    // mCommand上面传值0，执行doConnected                    doConnected(mName, mService, mDead);                } else if (mCommand == 1) {                    doDeath(mName, mService);                }            }            final ComponentName mName;            final IBinder mService;            final int mCommand;            final boolean mDead;        }
+  ```
+
+- 执行doConnected
+
+```java
+        public void doConnected(ComponentName name, IBinder service, boolean dead) {            ServiceDispatcher.ConnectionInfo old;            ServiceDispatcher.ConnectionInfo info;            synchronized (this) {                if (mForgotten) {                    // We unbound before receiving the connection; ignore                    // any connection received.                    return;                }                old = mActiveConnections.get(name);                if (old != null && old.binder == service) {                    // Huh, already have this one.  Oh well!                    return;                }                if (service != null) {                    // A new service is being connected... set it all up.                    info = new ConnectionInfo();                    info.binder = service;                    info.deathMonitor = new DeathMonitor(name, service);                    try {                        service.linkToDeath(info.deathMonitor, 0);                        mActiveConnections.put(name, info);                    } catch (RemoteException e) {                        // This service was dead before we got it...  just                        // don't do anything with it.                        mActiveConnections.remove(name);                        return;                    }                } else {                    // The named service is being disconnected... clean up.                    mActiveConnections.remove(name);                }                if (old != null) {                    old.binder.unlinkToDeath(old.deathMonitor, 0);                }            }            // If there was an old service, it is now disconnected.            if (old != null) {                mConnection.onServiceDisconnected(name);            }            if (dead) {                mConnection.onBindingDied(name);            }            // If there is a new service, it is now connected.            if (service != null) {                mConnection.onServiceConnected(name, service);            }        }
+```
+
+最后执行`mConnection.onServiceConnected(name, service);`方法
+
+### 五、IntentService原理
+
+#### 1、特点
+
+- IntentService继承Service
+- 在子线程调用onHandleIntent方法，处理耗时任务
+- onHandlerIntent执行完成后，调用stopSelf()自动停止服务
+
+#### 2、onCreate启动线程和将Handler绑定子线程Looper
+
+```java
+    @Override    public void onCreate() {        super.onCreate();        HandlerThread thread = new HandlerThread("IntentService[" + mName + "]");        thread.start();        mServiceLooper = thread.getLooper();        mServiceHandler = new ServiceHandler(mServiceLooper);    }
+```
+
+- 创建**HandlerThread**对象，HandlerThread类继承Thread，在run()方法中实现了Looper绑定
+
+  ```java
+      public void run() {        mTid = Process.myTid();        Looper.prepare();        synchronized (this) {            mLooper = Looper.myLooper();            notifyAll();        }        Process.setThreadPriority(mPriority);        onLooperPrepared();        Looper.loop();        mTid = -1;    }
+  ```
+
+- 创建**ServiceHandler**，并与**HandlerThread**线程的Looper绑定。ServiceHandler继承Handler。这样ServiceHandler发送的消息就会在子线程中接收
+
+  ```java
+      private final class ServiceHandler extends Handler {        public ServiceHandler(Looper looper) {            super(looper);        }        @Override        public void handleMessage(Message msg) {            onHandleIntent((Intent)msg.obj);            stopSelf(msg.arg1);        }    }
+  ```
+
+  #### 3、onStart 和 onStartCommand 在子线程中调用onHandleIntent
+
+  ```java
+      @Override    public void onStart(@Nullable Intent intent, int startId) {        Message msg = mServiceHandler.obtainMessage();        msg.arg1 = startId;        msg.obj = intent;        mServiceHandler.sendMessage(msg);    }    @Override    public int onStartCommand(@Nullable Intent intent, int flags, int startId) {        onStart(intent, startId);        return mRedelivery ? START_REDELIVER_INTENT : START_NOT_STICKY;    }
+  ```
+
+  
+
+
+
+
+
+
+
